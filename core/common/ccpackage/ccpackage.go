@@ -134,7 +134,7 @@ func CreateSignedCCDepSpecForInstall(pack []*common.Envelope) (*common.Envelope,
 	//   the chaincode deployment spec should be same
 	var baseCip *peer.SignedChaincodeDeploymentSpec
 	var err error
-	var endorsementExists bool
+	var endorsementExists bool  // no set  ping40
 	var endorsements []*peer.Endorsement
 	for n, r := range pack {
 		p := &common.Payload{}

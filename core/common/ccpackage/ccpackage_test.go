@@ -32,6 +32,7 @@ import (
 	"github.com/hyperledger/fabric/protos/utils"
 )
 
+
 func ownerCreateCCDepSpec(codepackage []byte, sigpolicy *common.SignaturePolicyEnvelope, owner msp.SigningIdentity) (*common.Envelope, error) {
 	cds := &peer.ChaincodeDeploymentSpec{CodePackage: codepackage}
 	return OwnerCreateSignedCCDepSpec(cds, sigpolicy, owner)
