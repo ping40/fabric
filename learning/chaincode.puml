@@ -1,0 +1,48 @@
+@startuml
+
+
+class ChaincodeSpec  {
+	Type                 ChaincodeSpec_Type
+	ChaincodeId          *ChaincodeID
+	Input                *ChaincodeInput
+	Timeout              int32
+}
+
+
+class ChaincodeDeploymentSpec  {
+	ChaincodeSpec        *ChaincodeSpec
+	CodePackage          []byte
+	ExecEnv
+}
+
+ChaincodeDeploymentSpec --> ChaincodeSpec
+
+
+class ChaincodeData  {
+	// Name of the chaincode
+	Name string `protobuf:"bytes,1,opt,name=name"`
+
+	// Version of the chaincode
+	Version string `protobuf:"bytes,2,opt,name=version"`
+
+	// Escc for the chaincode instance
+	Escc string `protobuf:"bytes,3,opt,name=escc"`
+
+	// Vscc for the chaincode instance
+	Vscc string `protobuf:"bytes,4,opt,name=vscc"`
+
+	// Policy endorsement policy for the chaincode instance
+	Policy []byte `protobuf:"bytes,5,opt,name=policy,proto3"`
+
+	// Data data specific to the package
+	Data []byte `protobuf:"bytes,6,opt,name=data,proto3"`
+
+	// Id of the chaincode that's the unique fingerprint for the CC This is not
+	// currently used anywhere but serves as a good eyecatcher
+	Id []byte `protobuf:"bytes,7,opt,name=id,proto3"`
+
+	// InstantiationPolicy for the chaincode
+	InstantiationPolicy []byte `protobuf:"bytes,8,opt,name=instantiation_policy,proto3"`
+}
+
+@enduml
