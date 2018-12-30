@@ -86,7 +86,7 @@ func (d *txDependency) waitForAndRetrieveValidationResult(ns string) error {
 	}
 
 	for !ok {
-		d.cond.Wait()
+		d.cond.Wait()//操作实际上是对与cond绑定的锁先进行解锁，在等待通知；接收到通知后，会尝试加锁，加锁成功则唤醒否则继续等待通知；
 		err, ok = d.validationResultMap[ns]
 	}
 
@@ -102,7 +102,7 @@ func (d *txDependency) signalValidationResult(ns string, err error) {
 	defer d.mutex.Unlock()
 
 	d.validationResultMap[ns] = err
-	d.cond.Broadcast()
+	d.cond.Broadcast()//cond.Broadcast进行广播唤醒所有，如果是互斥锁肯定只有一个运行实体会重新获取到锁；而如果是读写锁则所有实体都可以成功RLock
 }
 
 /**********************************************************************************************************/
@@ -217,7 +217,7 @@ func (c *validationContext) waitForValidationResults(kid *ledgerKeyID, blockNum 
 	// produce the result.
 
 	for _, dep := range c.dependenciesForTxnum(kid, txnum) {
-		if valErr := dep.waitForAndRetrieveValidationResult(kid.cc); valErr == nil {
+		if valErr := dep.waitForAndRetrieveValidationResult(kid.cc); valErr == nil {// ? ping40
 			return &ValidationParameterUpdatedError{
 				CC:     kid.cc,
 				Coll:   kid.coll,
@@ -242,7 +242,7 @@ type KeyLevelValidationParameterManagerImpl struct {
 // the same name of the KeyLevelValidationParameterManager interface
 // Note that this function doesn't take any namespace argument. This is
 // because we want to inspect all namespaces for which this transaction
-// modifies metadata.
+// modifies metadata.  txNum从0开始增加 --> for tIdx, d := range block.Data.Data validator.go
 func (m *KeyLevelValidationParameterManagerImpl) ExtractValidationParameterDependency(blockNum, txNum uint64, rwsetBytes []byte) {
 	vCtx := m.validationCtx.forBlock(blockNum)
 

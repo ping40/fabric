@@ -68,7 +68,7 @@ func (p *policyChecker) checkSBAndCCEP(cc, coll, key string, blockNum, txNum uin
 		case *ValidationParameterUpdatedError:
 			return policyErr(err)
 		// 2) if the ledger returns "determinstic" errors, that is, errors that
-		//    every peer in the channel will also return (such as errors linked to
+		//    every peer in the channel will also return (such as errors linked to 用例是什么？
 		//    an attempt to retrieve metadata from a non-defined collection) should be
 		//    logged and ignored. The ledger will take the most appropriate action
 		//    when performing its side of the validation.
@@ -116,13 +116,14 @@ type blockDependency struct {
 }
 
 // KeyLevelValidator implements per-key level ep validation
-type KeyLevelValidator struct {
+type KeyLevelValidator struct {// 是针对channel的单例 ？
 	vpmgr         KeyLevelValidationParameterManager
 	policySupport validation.PolicyEvaluator
 	blockDep      blockDependency
 }
 
 func NewKeyLevelValidator(policySupport validation.PolicyEvaluator, vpmgr KeyLevelValidationParameterManager) *KeyLevelValidator {
+	logger.Errorf("ping 000 NewKeyLevelValidator  00")
 	return &KeyLevelValidator{
 		vpmgr:         vpmgr,
 		policySupport: policySupport,

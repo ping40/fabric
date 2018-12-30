@@ -94,7 +94,7 @@ func (sc *SimpleCollection) Setup(collectionConfig *common.StaticCollectionConfi
 		switch principal.PrincipalClassification {
 		case m.MSPPrincipal_ROLE:
 			// Principal contains the msp role
-			mspRole := &m.MSPRole{}
+			mspRole := &m.MSPRole{}// role 下面有多种类型，为什么不区分呢？
 			err := proto.Unmarshal(principal.Principal, mspRole)
 			if err != nil {
 				return errors.Wrap(err, "Could not unmarshal MSPRole from principal")

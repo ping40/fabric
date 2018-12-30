@@ -42,7 +42,7 @@ func deduplicate(sds []IdentityAndSignature) []IdentityAndSignature {
 }
 
 // compile recursively builds a go evaluatable function corresponding to the policy specified, remember to call deduplicate on identities before
-// passing them to this function for evaluation
+// passing them to this function for evaluation   ping40 deserializer 参数没用用
 func compile(policy *cb.SignaturePolicy, identities []*mb.MSPPrincipal, deserializer msp.IdentityDeserializer) (func([]IdentityAndSignature, []bool) bool, error) {
 	if policy == nil {
 		return nil, fmt.Errorf("Empty policy element")
@@ -66,7 +66,7 @@ func compile(policy *cb.SignaturePolicy, identities []*mb.MSPPrincipal, deserial
 			_used := make([]bool, len(used))
 			for _, policy := range policies {
 				copy(_used, used)
-				if policy(signedData, _used) {
+				if policy(signedData, _used) {// 同一条数据，如果通过了，下一个policy就不检查了
 					verified++
 					copy(used, _used)
 				}
@@ -101,13 +101,13 @@ func compile(policy *cb.SignaturePolicy, identities []*mb.MSPPrincipal, deserial
 					cauthdslLogger.Errorf("Principal deserialization failure (%s) for identity %d", err, i)
 					continue
 				}
-				err = identity.SatisfiesPrincipal(signedByID)
+				err = identity.SatisfiesPrincipal(signedByID)//证明是我这个id签发的
 				if err != nil {
 					cauthdslLogger.Debugf("%p identity %d does not satisfy principal: %s", signedData, i, err)
 					continue
 				}
 				cauthdslLogger.Debugf("%p principal matched by identity %d", signedData, i)
-				err = sd.Verify()
+				err = sd.Verify() //证明 签名是对的
 				if err != nil {
 					cauthdslLogger.Debugf("%p signature for identity %d is invalid: %s", signedData, i, err)
 					continue

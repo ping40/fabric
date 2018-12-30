@@ -157,7 +157,7 @@ func (s *server) Broadcast(srv ab.AtomicBroadcast_BroadcastServer) error {
 
 // Deliver sends a stream of blocks to a client after ordering
 func (s *server) Deliver(srv ab.AtomicBroadcast_DeliverServer) error {
-	logger.Debugf("Starting new Deliver handler")
+	logger.Errorf("ping0ab Starting new Deliver handler")
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Criticalf("Deliver client triggered panic: %s\n%s", r, debug.Stack())

@@ -8,8 +8,11 @@ package deliver
 
 import (
 	"context"
+	"fmt"
+	"github.com/hyperledger/fabric/common/tools/protolator"
 	"io"
 	"math"
+	"os"
 	"strconv"
 	"time"
 
@@ -145,7 +148,7 @@ func NewHandler(cm ChainManager, timeWindow time.Duration, mutualTLS bool, metri
 // Handle receives incoming deliver requests.
 func (h *Handler) Handle(ctx context.Context, srv *Server) error {
 	addr := util.ExtractRemoteAddress(ctx)
-	logger.Debugf("Starting new deliver loop for %s", addr)
+	logger.Errorf("Starting new deliver loop for %s", addr)
 	h.Metrics.StreamsOpened.Add(1)
 	defer h.Metrics.StreamsClosed.Add(1)
 	for {
@@ -317,6 +320,13 @@ func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.E
 		}
 
 		logger.Debugf("[channel: %s] Delivering block for (%p) for %s", chdr.ChannelId, seekInfo, addr)
+
+		fd,_:=os.OpenFile(fmt.Sprintf("/tmp/block%d.json",block.Header.Number),os.O_RDWR|os.O_CREATE,0644)
+		err = protolator.DeepMarshalJSON(fd, block)
+		if err != nil {
+			logger.Errorf("error protolator.DeepMarshalJSON: %v", err)
+		}
+		fd.Close()
 
 		if err := srv.SendBlockResponse(block); err != nil {
 			logger.Warningf("[channel: %s] Error sending to %s: %s", chdr.ChannelId, addr, err)

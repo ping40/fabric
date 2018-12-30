@@ -1,0 +1,12 @@
+@startuml
+class Transaction {
+  Actions  []*TransactionAction
+}
+
+class TransactionAction  {
+    Header               []byte
+    Payload              []byte
+}
+
+Transaction *-- TransactionAction
+@enduml

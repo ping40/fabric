@@ -1,0 +1,64 @@
+@startuml
+
+class TxReadWriteSet {
+ DataModel TxReadWriteSet_DataModel
+ NsRwset []*NsReadWriteSet
+}
+
+class NsReadWriteSet {
+ Namespace string
+ Rwset []byte
+ CollectionHashedRwset []*CollectionHashedReadWriteSet
+}
+
+TxReadWriteSet *-- NsReadWriteSet
+
+
+class KVRWSet {
+	Reads []*KVRead
+	RangeQueriesInfo []*RangeQueryInfo
+	Writes []*KVWrite
+	MetadataWrites []*KVMetadataWrite
+}
+
+NsReadWriteSet ..> KVRWSet : 转化的关系
+note top of KVRWSet: "NsReadWriteSet中\nRwset []byte 的内容"
+
+class CollectionHashedReadWriteSet {
+	CollectionName string 
+	HashedRwset []byte
+}
+NsReadWriteSet *-- CollectionHashedReadWriteSet
+
+class CollHashedRwSet {
+	CollectionName string
+	HashedRwSet *kvrwset.HashedRWSet
+	PvtRwSetHash []byte
+}
+
+CollectionHashedReadWriteSet ..> CollHashedRwSet : 转化的关系
+
+class TxRwSet {
+	NsRwSets []*NsRwSet
+}
+
+class NsRwSet {
+	NameSpace string
+	KvRwSet *kvrwset.KVRWSet
+	CollHashedRwSets []*CollHashedRwSet
+}
+TxRwSet *-- NsRwSet
+NsRwSet *-- KVRWSet
+TxReadWriteSet ..> TxRwSet :高层次地转化关系
+
+NsRwSet *-- CollHashedRwSet
+
+
+class HashedRWSet {
+	HashedReads []*KVReadHash 
+	HashedWrites []*KVWriteHash 
+	MetadataWrites []*KVMetadataWriteHash 
+}
+
+CollHashedRwSet --> HashedRWSet
+@enduml
