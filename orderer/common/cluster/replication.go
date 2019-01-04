@@ -27,6 +27,10 @@ const (
 	RetryTimeout = time.Second * 10
 )
 
+func AnyChannel(_ string) bool {
+	return true
+}
+
 // PullerConfigFromTopLevelConfig creates a PullerConfig from a TopLevel config,
 // and from a signer and TLS key cert pair.
 // The PullerConfig's channel is initialized to be the system channel.
@@ -73,13 +77,15 @@ type ChannelLister interface {
 
 // Replicator replicates chains
 type Replicator struct {
-	SystemChannel    string
-	ChannelLister    ChannelLister
-	Logger           *flogging.FabricLogger
-	Puller           *BlockPuller
-	BootBlock        *common.Block
-	AmIPartOfChannel selfMembershipPredicate
-	LedgerFactory    LedgerFactory
+	DoNotPanicIfClusterNotReachable bool
+	Filter                          func(string) bool
+	SystemChannel                   string
+	ChannelLister                   ChannelLister
+	Logger                          *flogging.FabricLogger
+	Puller                          *BlockPuller
+	BootBlock                       *common.Block
+	AmIPartOfChannel                selfMembershipPredicate
+	LedgerFactory                   LedgerFactory
 }
 
 // IsReplicationNeeded returns whether replication is needed,
@@ -107,13 +113,20 @@ func (r *Replicator) IsReplicationNeeded() (bool, error) {
 }
 
 // ReplicateChains pulls chains and commits them.
-func (r *Replicator) ReplicateChains() {
+// Returns the names of the chains replicated successfully.
+func (r *Replicator) ReplicateChains() []string {
+	var replicatedChains []string
 	channels := r.discoverChannels()
 	pullHints := r.channelsToPull(channels)
 	totalChannelCount := len(pullHints.channelsToPull) + len(pullHints.channelsNotToPull)
 	r.Logger.Info("Found myself in", len(pullHints.channelsToPull), "channels out of", totalChannelCount, ":", pullHints)
 	for _, channel := range pullHints.channelsToPull {
-		r.PullChannel(channel.ChannelName)
+		err := r.PullChannel(channel.ChannelName)
+		if err == nil {
+			replicatedChains = append(replicatedChains, channel.ChannelName)
+		} else {
+			r.Logger.Warningf("Failed pulling channel %s: %v", channel.ChannelName, err)
+		}
 	}
 	// Next, just commit the genesis blocks of the channels we shouldn't pull.
 	for _, channel := range pullHints.channelsNotToPull {
@@ -132,9 +145,10 @@ func (r *Replicator) ReplicateChains() {
 	}
 
 	// Last, pull the system chain
-	if err := r.PullChannel(r.SystemChannel); err != nil {
+	if err := r.PullChannel(r.SystemChannel); err != nil && err != ErrSkipped {
 		r.Logger.Panicf("Failed pulling system channel: %v", err)
 	}
+	return replicatedChains
 }
 
 func (r *Replicator) discoverChannels() []ChannelGenesisBlock {
@@ -149,12 +163,16 @@ func (r *Replicator) discoverChannels() []ChannelGenesisBlock {
 // PullChannel pulls the given channel from some orderer,
 // and commits it to the ledger.
 func (r *Replicator) PullChannel(channel string) error {
+	if !r.Filter(channel) {
+		r.Logger.Info("Channel", channel, "shouldn't be pulled. Skipping it")
+		return ErrSkipped
+	}
 	r.Logger.Info("Pulling channel", channel)
 	puller := r.Puller.Clone()
 	defer puller.Close()
 	puller.Channel = channel
 
-	endpoint, latestHeight := latestHeightAndEndpoint(puller)
+	endpoint, latestHeight, _ := latestHeightAndEndpoint(puller)
 	if endpoint == "" {
 		return errors.Errorf("failed obtaining the latest block for channel %s", channel)
 	}
@@ -230,7 +248,7 @@ type channelPullHints struct {
 }
 
 func (r *Replicator) channelsToPull(channels GenesisBlocks) channelPullHints {
-	r.Logger.Info("Will now pull channels:", channels.Names())
+	r.Logger.Info("Will now attempt to pull channels:", channels.Names())
 	var channelsNotToPull []ChannelGenesisBlock
 	var channelsToPull []ChannelGenesisBlock
 	for _, channel := range channels {
@@ -245,15 +263,24 @@ func (r *Replicator) channelsToPull(channels GenesisBlocks) channelPullHints {
 		puller.Close()
 		// Restore the previous buffer size
 		puller.MaxTotalBufferBytes = bufferSize
-		if err == ErrNotInChannel {
-			r.Logger.Info("I do not belong to channel", channel.ChannelName, ", skipping chain retrieval")
+		if err == ErrNotInChannel || err == ErrForbidden {
+			r.Logger.Infof("I do not belong to channel %s or am forbidden pulling it (%v), skipping chain retrieval", channel.ChannelName, err)
+			channelsNotToPull = append(channelsNotToPull, channel)
+			continue
+		}
+		if err == ErrServiceUnavailable {
+			r.Logger.Infof("All orderers in the system channel are either down,"+
+				"or do not service channel %s (%v), skipping chain retrieval", channel.ChannelName, err)
 			channelsNotToPull = append(channelsNotToPull, channel)
 			continue
 		}
 		if err != nil {
-			r.Logger.Panicf("Failed classifying whether I belong to channel %s: %v, skipping chain retrieval", channel.ChannelName, err)
+			if !r.DoNotPanicIfClusterNotReachable {
+				r.Logger.Panicf("Failed classifying whether I belong to channel %s: %v, skipping chain retrieval", channel.ChannelName, err)
+			}
 			continue
 		}
+		r.Logger.Infof("I need to pull channel %s", channel.ChannelName)
 		channelsToPull = append(channelsToPull, channel)
 	}
 	return channelPullHints{
@@ -332,7 +359,7 @@ type ChainPuller interface {
 	PullBlock(seq uint64) *common.Block
 
 	// HeightsByEndpoints returns the block heights by endpoints of orderers
-	HeightsByEndpoints() map[string]uint64
+	HeightsByEndpoints() (map[string]uint64, error)
 
 	// Close closes the ChainPuller
 	Close()
@@ -344,6 +371,15 @@ type ChainInspector struct {
 	Puller          ChainPuller
 	LastConfigBlock *common.Block
 }
+
+// ErrSkipped denotes that replicating a chain was skipped
+var ErrSkipped = errors.New("skipped")
+
+// ErrForbidden denotes that an ordering node refuses sending blocks due to access control.
+var ErrForbidden = errors.New("forbidden")
+
+// ErrServiceUnavailable denotes that an ordering node is not servicing at the moment.
+var ErrServiceUnavailable = errors.New("service unavailable")
 
 // ErrNotInChannel denotes that an ordering node is not in the channel
 var ErrNotInChannel = errors.New("not in the channel")
@@ -357,7 +393,10 @@ type selfMembershipPredicate func(configBlock *common.Block) error
 // It returns nil if the caller participates in the chain.
 // It may return notInChannelError error in case the caller doesn't participate in the chain.
 func Participant(puller ChainPuller, analyzeLastConfBlock selfMembershipPredicate) error {
-	endpoint, latestHeight := latestHeightAndEndpoint(puller)
+	endpoint, latestHeight, err := latestHeightAndEndpoint(puller)
+	if err != nil {
+		return err
+	}
 	if endpoint == "" {
 		return errors.New("no available orderer")
 	}
@@ -374,16 +413,20 @@ func Participant(puller ChainPuller, analyzeLastConfBlock selfMembershipPredicat
 	return analyzeLastConfBlock(lastConfigBlock)
 }
 
-func latestHeightAndEndpoint(puller ChainPuller) (string, uint64) {
+func latestHeightAndEndpoint(puller ChainPuller) (string, uint64, error) {
 	var maxHeight uint64
 	var mostUpToDateEndpoint string
-	for endpoint, height := range puller.HeightsByEndpoints() {
+	heightsByEndpoints, err := puller.HeightsByEndpoints()
+	if err != nil {
+		return "", 0, err
+	}
+	for endpoint, height := range heightsByEndpoints {
 		if height >= maxHeight {
 			maxHeight = height
 			mostUpToDateEndpoint = endpoint
 		}
 	}
-	return mostUpToDateEndpoint, maxHeight
+	return mostUpToDateEndpoint, maxHeight, nil
 }
 
 func lastConfigFromBlock(block *common.Block) (uint64, error) {
@@ -492,6 +535,7 @@ func ChannelCreationBlockToGenesisBlock(block *common.Block) (*common.Block, err
 		return nil, err
 	}
 	block.Data.Data = [][]byte{payload.Data}
+	block.Header.DataHash = block.Data.Hash()
 	block.Header.Number = 0
 	block.Header.PreviousHash = nil
 	metadata := &common.BlockMetadata{

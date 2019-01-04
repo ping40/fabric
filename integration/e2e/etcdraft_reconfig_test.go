@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package e2e
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -17,8 +18,10 @@ import (
 	"time"
 
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
+	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
 	"github.com/hyperledger/fabric/protos/utils"
 	. "github.com/onsi/ginkgo"
@@ -37,6 +40,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 		network *nwo.Network
 		mycc    nwo.Chaincode
 		mycc2   nwo.Chaincode
+		mycc3   nwo.Chaincode
 		peer    *nwo.Peer
 
 		peerProcesses    ifrit.Process
@@ -61,6 +65,13 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 		}
 		mycc2 = nwo.Chaincode{
 			Name:    "mycc2",
+			Version: "0.0",
+			Path:    "github.com/hyperledger/fabric/integration/chaincode/simple/cmd",
+			Ctor:    `{"Args":["init","a","100","b","200"]}`,
+			Policy:  `OR ('Org1MSP.member','Org2MSP.member')`,
+		}
+		mycc3 = nwo.Chaincode{
+			Name:    "mycc3",
 			Version: "0.0",
 			Path:    "github.com/hyperledger/fabric/integration/chaincode/simple/cmd",
 			Ctor:    `{"Args":["init","a","100","b","200"]}`,
@@ -96,22 +107,26 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 
 			// Consenter i after its certificate is rotated is denoted as consenter i'
 			// The blocks of channels contain the following updates:
-			//   | system channel height | testchannel  height  | update description
+			//    | system channel height | testchannel  height  | update description
 			// ------------------------------------------------------------------------
-			// 0 |            2          |         1            | adding consenter 1'
-			// 1 |            3          |         2            | removing consenter 1
-			// 2 |            4          |         3            | adding consenter 2'
-			// 3 |            5          |         4            | removing consenter 2
-			// 4 |            6          |         5            | adding consenter 3'
-			// 5 |            7          |         6            | removing consenter 3
-			// 6 |            8          |         6            | creating channel testchannel2
-			// 7 |            9          |         7            | adding consenter 4
-			// 8 |            9          |         8            | deploying chaincode on testchannel
-			// 9 |            9          |         9            | invoking chaincode on testchannel
+			// 0  |            2          |         1            | adding consenter 1'
+			// 1  |            3          |         2            | removing consenter 1
+			// 2  |            4          |         3            | adding consenter 2'
+			// 3  |            5          |         4            | removing consenter 2
+			// 4  |            6          |         5            | adding consenter 3'
+			// 5  |            7          |         6            | removing consenter 3
+			// 6  |            8          |         6            | creating channel testchannel2
+			// 7  |            9          |         6            | creating channel testchannel3
+			// 8  |            10         |         7            | adding consenter 4
+			// 9  |            10         |         8            | deploying chaincode on testchannel
+			// 10 |            10         |         9            | invoking chaincode on testchannel
 
 			layout := nwo.MultiNodeEtcdRaft()
 			layout.Channels = append(layout.Channels, &nwo.Channel{
 				Name:    "testchannel2",
+				Profile: "TwoOrgsChannel",
+			}, &nwo.Channel{
+				Name:    "testchannel3",
 				Profile: "TwoOrgsChannel",
 			})
 			network = nwo.New(layout, testDir, client, BasePort(), components)
@@ -209,6 +224,12 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 				"systemchannel": 8,
 			}, orderers, peer, network)
 
+			By("Creating testchannel3")
+			network.CreateChannel("testchannel3", network.Orderers[0], peer)
+			assertBlockReception(map[string]int{
+				"systemchannel": 9,
+			}, orderers, peer, network)
+
 			o4 := &nwo.Orderer{
 				Name:         "orderer4",
 				Organization: "OrdererOrg",
@@ -240,7 +261,7 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 
 			By("Ensuring all orderers know about orderer4's addition")
 			assertBlockReception(map[string]int{
-				"systemchannel": 9,
+				"systemchannel": 10,
 				"testchannel":   7,
 			}, orderers, peer, network)
 
@@ -248,23 +269,26 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			network.JoinChannel("testchannel", o1, peer)
 			By("Joining the peer to testchannel2")
 			network.JoinChannel("testchannel2", o1, peer)
+			By("Joining the peer to testchannel3")
+			network.JoinChannel("testchannel3", o1, peer)
 
-			By("Deploying mycc and mycc2 to testchannel and testchannel2")
-			deployChaincodes(network, peer, o2, mycc, mycc2)
+			By("Deploying mycc and mycc2 and mycc3 to testchannel and testchannel2 and testchannel3")
+			deployChaincodes(network, peer, o2, mycc, mycc2, mycc3)
 
 			By("Waiting for orderers to sync")
 			assertBlockReception(map[string]int{
-				"systemchannel": 9,
-				"testchannel":   8,
+				"testchannel": 8,
 			}, orderers, peer, network)
 
 			By("Transacting on testchannel once more")
 			assertInvoke(network, peer, o1, mycc.Name, "testchannel", "Chaincode invoke successful. result: status:200", 0)
 
 			assertBlockReception(map[string]int{
-				"systemchannel": 9,
-				"testchannel":   9,
+				"testchannel": 9,
 			}, orderers, peer, network)
+
+			By("Corrupting the readers policy of testchannel3")
+			revokeReaderAccess(network, "testchannel3", o3, peer)
 
 			// Get the last config block of the system channel
 			configBlock := nwo.GetConfigBlock(network, peer, o1, "systemchannel")
@@ -283,16 +307,39 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 
 			By("And waiting for it to sync with the rest of the orderers")
 			assertBlockReception(map[string]int{
-				"systemchannel": 9,
+				"systemchannel": 10,
 				"testchannel":   9,
 			}, orderers, peer, network)
 
-			By("Ensuring orderer4 doesn't serve testchannel2")
-
+			By("Ensuring orderer4 doesn't serve testchannel2 and testchannel3")
 			assertInvoke(network, peer, o4, mycc2.Name, "testchannel2", "channel testchannel2 is not serviced by me", 1)
+			assertInvoke(network, peer, o4, mycc3.Name, "testchannel3", "channel testchannel3 is not serviced by me", 1)
+			Expect(string(orderer4Runner.Err().Contents())).To(ContainSubstring("I do not belong to channel testchannel2 or am forbidden pulling it (not in the channel), skipping chain retrieval"))
+			Expect(string(orderer4Runner.Err().Contents())).To(ContainSubstring("I do not belong to channel testchannel3 or am forbidden pulling it (forbidden), skipping chain retrieval"))
+
+			By("Adding orderer4 to testchannel2")
+			nwo.AddConsenter(network, peer, o1, "testchannel2", etcdraft.Consenter{
+				ServerTlsCert: orderer4Certificate,
+				ClientTlsCert: orderer4Certificate,
+				Host:          "127.0.0.1",
+				Port:          uint32(network.OrdererPort(o4, nwo.ListenPort)),
+			})
+
+			By("Waiting for orderer4 and to replicate testchannel2")
+			assertBlockReception(map[string]int{
+				"testchannel2": 2,
+			}, []*nwo.Orderer{o4}, peer, network)
 
 			By("Ensuring that all orderers don't log errors to the log")
 			assertNoErrorsAreLogged(ordererRunners)
+
+			By("Submitting a transaction through orderer4")
+			assertInvoke(network, peer, o4, mycc2.Name, "testchannel2", "Chaincode invoke successful. result: status:200", 0)
+
+			By("And ensuring it is propagated amongst all orderers")
+			assertBlockReception(map[string]int{
+				"testchannel2": 3,
+			}, orderers, peer, network)
 		})
 	})
 })
@@ -442,14 +489,17 @@ func waitForBlockReception(o *nwo.Orderer, submitter *nwo.Peer, network *nwo.Net
 	Eventually(func() string {
 		sess, err := network.OrdererAdminSession(o, submitter, c)
 		Expect(err).NotTo(HaveOccurred())
-		Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit(0))
+		Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit())
+		if sess.ExitCode() != 0 {
+			return fmt.Sprintf("exit code is %d: %s", sess.ExitCode(), string(sess.Err.Contents()))
+		}
 		sessErr := string(sess.Err.Contents())
 		expected := fmt.Sprintf("Received block: %d", blockSeq)
 		if strings.Contains(sessErr, expected) {
 			return ""
 		}
 		return sessErr
-	}, network.EventuallyTimeout).Should(BeEmpty())
+	}, time.Minute, time.Second).Should(BeEmpty())
 }
 
 func assertNoErrorsAreLogged(ordererRunners []*ginkgomon.Runner) {
@@ -457,17 +507,23 @@ func assertNoErrorsAreLogged(ordererRunners []*ginkgomon.Runner) {
 	wg.Add(len(ordererRunners))
 
 	assertNoErrors := func(runner *ginkgomon.Runner) {
-		buff := runner.Buffer()
-		// Advance buffer read cursor to the end by reading everything
-		buff.Read(make([]byte, len(buff.Contents())))
-		// Starting from now, there shouldn't be any error strings logged
-		// for 5 seconds.
-		select {
-		case <-time.After(time.Second * 5):
-		case <-buff.Detect("ERRO"):
-			Fail("Detected 'ERRO' in the buffer")
+		buff := runner.Err()
+		readOutput := func() string {
+			out := bytes.Buffer{}
+			// Read until no new input is detected
+			for {
+				b := make([]byte, 1024)
+				n, _ := buff.Read(b)
+				if n == 0 {
+					break
+				}
+				bytesRead := make([]byte, n)
+				copy(bytesRead, b)
+				out.Write(bytesRead)
+			}
+			return out.String()
 		}
-		buff.CancelDetects()
+		Eventually(readOutput, time.Minute, time.Second*5).Should(Not(ContainSubstring("ERRO")))
 	}
 
 	for _, runner := range ordererRunners {
@@ -479,12 +535,13 @@ func assertNoErrorsAreLogged(ordererRunners []*ginkgomon.Runner) {
 	wg.Wait()
 }
 
-func deployChaincodes(n *nwo.Network, p *nwo.Peer, o *nwo.Orderer, mycc nwo.Chaincode, mycc2 nwo.Chaincode) {
+func deployChaincodes(n *nwo.Network, p *nwo.Peer, o *nwo.Orderer, mycc nwo.Chaincode, mycc2 nwo.Chaincode, mycc3 nwo.Chaincode) {
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	for channel, chaincode := range map[string]nwo.Chaincode{
 		"testchannel":  mycc,
 		"testchannel2": mycc2,
+		"testchannel3": mycc3,
 	} {
 		go func(channel string, cc nwo.Chaincode) {
 			defer wg.Done()
@@ -509,4 +566,17 @@ func assertInvoke(network *nwo.Network, peer *nwo.Peer, o *nwo.Orderer, cc strin
 	Expect(err).NotTo(HaveOccurred())
 	Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit(expectedStatus))
 	Expect(sess.Err).To(gbytes.Say(expectedOutput))
+}
+
+func revokeReaderAccess(network *nwo.Network, channel string, orderer *nwo.Orderer, peer *nwo.Peer) {
+	config := nwo.GetConfig(network, peer, orderer, channel)
+	updatedConfig := proto.Clone(config).(*common.Config)
+
+	// set the policy
+	adminPolicy := utils.MarshalOrPanic(&common.ImplicitMetaPolicy{
+		SubPolicy: "Admins",
+		Rule:      common.ImplicitMetaPolicy_MAJORITY,
+	})
+	updatedConfig.ChannelGroup.Groups["Orderer"].Policies["Readers"].Policy.Value = adminPolicy
+	nwo.UpdateOrdererConfig(network, orderer, channel, config, updatedConfig, peer, orderer)
 }
