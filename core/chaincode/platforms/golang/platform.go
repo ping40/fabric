@@ -485,6 +485,8 @@ func (goPlatform *Platform) GenerateDockerfile() (string, error) {
 
 	dockerFileContents := strings.Join(buf, "\n")
 
+
+	logger.Infof("ping 0xffea dockerFileContents : %+v \n ", dockerFileContents )
 	return dockerFileContents, nil
 }
 

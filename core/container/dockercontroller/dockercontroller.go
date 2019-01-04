@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -202,6 +203,9 @@ func (vm *DockerVM) deployImage(client dockerClient, ccid ccintf.CCID, reader io
 		InputStream:  reader,
 		OutputStream: outputbuf,
 	}
+
+	fmt.Printf("deployImage opts: %+v", opts)
+	debug.PrintStack()
 
 	startTime := time.Now()
 	err = client.BuildImage(opts)

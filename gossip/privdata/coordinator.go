@@ -229,6 +229,8 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 		blockAndPvtData.MissingPvtData.Add(missingRWS.seqInBlock, missingRWS.namespace, missingRWS.collection, false)
 	}
 
+
+
 	// commit block and private data
 	err = c.CommitWithPvtData(blockAndPvtData)
 	if err != nil {

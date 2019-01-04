@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package chaincode
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -50,6 +51,9 @@ func (r *RuntimeLauncher) Launch(ccci *ccprovider.ChaincodeContainerInfo) error 
 		if err != nil {
 			return err
 		}
+
+		fmt.Printf("ping a01 %+v",ccci)
+		fmt.Printf("ping a02 %+v",codePackage)
 
 		go func() {
 			if err := r.Runtime.Start(ccci, codePackage); err != nil {

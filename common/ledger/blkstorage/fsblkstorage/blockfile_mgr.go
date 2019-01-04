@@ -9,7 +9,9 @@ package fsblkstorage
 import (
 	"bytes"
 	"fmt"
+	"github.com/hyperledger/fabric/common/tools/protolator"
 	"math"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -322,6 +324,15 @@ func (mgr *blockfileMgr) addBlock(block *common.Block) error {
 	//update the checkpoint info (for storage) and the blockchain info (for APIs) in the manager
 	mgr.updateCheckpoint(newCPInfo)
 	mgr.updateBlockchainInfo(blockHash, block)
+
+	fd,_:=os.OpenFile(fmt.Sprintf("%s/peer-block%d.json",mgr.rootDir,block.Header.Number),os.O_RDWR|os.O_CREATE,0644)
+	err = protolator.DeepMarshalJSON(fd, block)
+	if err != nil {
+		logger.Errorf("error protolator.DeepMarshalJSON: %v", err)
+	}
+	fd.Close()
+
+
 	return nil
 }
 

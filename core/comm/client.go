@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
@@ -187,6 +188,7 @@ func (client *GRPCClient) NewConnection(address string, serverNameOverride strin
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, address, dialOpts...)
 	if err != nil {
+		fmt.Printf("ping 0xEFF9 : %+v " , err )
 		return nil, errors.WithMessage(errors.WithStack(err),
 			"failed to create new connection")
 	}

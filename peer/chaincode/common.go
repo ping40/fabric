@@ -77,7 +77,7 @@ func getChaincodeSpec(cmd *cobra.Command) (*pb.ChaincodeSpec, error) {
 	// Build the spec
 	input := &pb.ChaincodeInput{}
 	if err := json.Unmarshal([]byte(chaincodeCtorJSON), &input); err != nil {
-		return spec, errors.Wrap(err, "chaincode argument error")
+		return spec, errors.Wrap(err, "chaincode argument error 01")
 	}
 
 	chaincodeLang = strings.ToUpper(chaincodeLang)
@@ -268,7 +268,7 @@ func checkChaincodeCmdParams(cmd *cobra.Command) error {
 		var f interface{}
 		err := json.Unmarshal([]byte(chaincodeCtorJSON), &f)
 		if err != nil {
-			return errors.Wrap(err, "chaincode argument error")
+			return errors.Wrap(err, "chaincode argument error 02")
 		}
 		m := f.(map[string]interface{})
 		sm := make(map[string]interface{})
