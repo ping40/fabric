@@ -145,6 +145,8 @@ type Handler struct {
 	QueryResponseBuilder QueryResponseBuilder
 	// LedgerGetter is used to get the ledger associated with a channel
 	LedgerGetter LedgerGetter
+	// DeployedCCInfoProvider is used to initialize the Collection Store
+	DeployedCCInfoProvider ledger.DeployedChaincodeInfoProvider
 	// UUIDGenerator is used to generate UUIDs
 	UUIDGenerator UUIDGenerator
 	// AppConfig is used to retrieve the application config for a channel
@@ -643,6 +645,31 @@ func (h *Handler) HandleGetState(msg *pb.ChaincodeMessage, txContext *Transactio
 		chaincodeLogger.Debugf("[%s] No state associated with key: %s. Sending %s with an empty payload", shorttxid(msg.Txid), getState.Key, pb.ChaincodeMessage_RESPONSE)
 	}
 
+	// Send response msg back to chaincode. GetState will not trigger event
+	return &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: res, Txid: msg.Txid, ChannelId: msg.ChannelId}, nil
+}
+
+func (h *Handler) HandleGetPrivateDataHash(msg *pb.ChaincodeMessage, txContext *TransactionContext) (*pb.ChaincodeMessage, error) {
+	getState := &pb.GetState{}
+	err := proto.Unmarshal(msg.Payload, getState)
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshal failed")
+	}
+
+	var res []byte
+	chaincodeName := h.ChaincodeName()
+	collection := getState.Collection
+	chaincodeLogger.Debugf("[%s] getting private data hash for chaincode %s, key %s, channel %s", shorttxid(msg.Txid), chaincodeName, getState.Key, txContext.ChainID)
+	if txContext.IsInitTransaction {
+		return nil, errors.New("private data APIs are not allowed in chaincode Init()")
+	}
+	res, err = txContext.TXSimulator.GetPrivateDataHash(chaincodeName, collection, getState.Key)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if res == nil {
+		chaincodeLogger.Debugf("[%s] No state associated with key: %s. Sending %s with an empty payload", shorttxid(msg.Txid), getState.Key, pb.ChaincodeMessage_RESPONSE)
+	}
 	// Send response msg back to chaincode. GetState will not trigger event
 	return &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: res, Txid: msg.Txid, ChannelId: msg.ChannelId}, nil
 }
@@ -1246,7 +1273,8 @@ func (h *Handler) setChaincodeProposal(signedProp *pb.SignedProposal, prop *pb.P
 
 func (h *Handler) getCollectionStore(channelID string) privdata.CollectionStore {
 	csStoreSupport := &peer.CollectionSupport{
-		PeerLedger: h.LedgerGetter.GetLedger(channelID),
+		PeerLedger:             h.LedgerGetter.GetLedger(channelID),
+		DeployedCCInfoProvider: h.DeployedCCInfoProvider,
 	}
 	return privdata.NewSimpleCollectionStore(csStoreSupport)
 

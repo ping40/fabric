@@ -21,6 +21,7 @@ import (
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
 	"github.com/hyperledger/fabric/common/deliver"
 	"github.com/hyperledger/fabric/common/flogging"
+	floggingmetrics "github.com/hyperledger/fabric/common/flogging/metrics"
 	"github.com/hyperledger/fabric/common/grpclogging"
 	"github.com/hyperledger/fabric/common/grpcmetrics"
 	"github.com/hyperledger/fabric/common/localmsp"
@@ -31,7 +32,7 @@ import (
 	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/aclmgmt/resources"
 	"github.com/hyperledger/fabric/core/admin"
-	"github.com/hyperledger/fabric/core/cclifecycle"
+	cc "github.com/hyperledger/fabric/core/cclifecycle"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/chaincode/accesscontrol"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
@@ -48,12 +49,14 @@ import (
 	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/core/container/dockercontroller"
 	"github.com/hyperledger/fabric/core/container/inproccontroller"
+	"github.com/hyperledger/fabric/core/dispatcher"
 	"github.com/hyperledger/fabric/core/endorser"
 	authHandler "github.com/hyperledger/fabric/core/handlers/auth"
 	endorsement2 "github.com/hyperledger/fabric/core/handlers/endorsement/api"
 	endorsement3 "github.com/hyperledger/fabric/core/handlers/endorsement/api/identities"
 	"github.com/hyperledger/fabric/core/handlers/library"
-	"github.com/hyperledger/fabric/core/handlers/validation/api"
+	validation "github.com/hyperledger/fabric/core/handlers/validation/api"
+	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/cceventmgmt"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/operations"
@@ -93,6 +96,7 @@ const (
 	chaincodeAddrKey       = "peer.chaincodeAddress"
 	chaincodeListenAddrKey = "peer.chaincodeListenAddress"
 	defaultChaincodePort   = 7052
+	grpcMaxConcurrency     = 2500
 )
 
 var chaincodeDevMode bool
@@ -166,6 +170,8 @@ func serve(args []string) error {
 	defer opsSystem.Stop()
 
 	metricsProvider := opsSystem.Provider
+	logObserver := floggingmetrics.NewObserver(metricsProvider)
+	flogging.Global.SetObserver(logObserver)
 
 	membershipInfoProvider := privdata.NewMembershipInfoProvider(createSelfSignedData(), identityDeserializerFactory)
 	//initialize resource management exit
@@ -209,17 +215,20 @@ func serve(args []string) error {
 		logger.Fatalf("Error loading secure config for peer (%s)", err)
 	}
 
+	throttle := comm.NewThrottle(grpcMaxConcurrency)
 	serverConfig.Logger = flogging.MustGetLogger("core.comm").With("server", "PeerServer")
 	serverConfig.MetricsProvider = metricsProvider
 	serverConfig.UnaryInterceptors = append(
 		serverConfig.UnaryInterceptors,
 		grpcmetrics.UnaryServerInterceptor(grpcmetrics.NewUnaryMetrics(metricsProvider)),
 		grpclogging.UnaryServerInterceptor(flogging.MustGetLogger("comm.grpc.server").Zap()),
+		throttle.UnaryServerIntercptor,
 	)
 	serverConfig.StreamInterceptors = append(
 		serverConfig.StreamInterceptors,
 		grpcmetrics.StreamServerInterceptor(grpcmetrics.NewStreamMetrics(metricsProvider)),
 		grpclogging.StreamServerInterceptor(flogging.MustGetLogger("comm.grpc.server").Zap()),
+		throttle.StreamServerInterceptor,
 	)
 
 	peerServer, err := peer.NewPeerServer(listenAddr, serverConfig)
@@ -252,7 +261,7 @@ func serve(args []string) error {
 	pb.RegisterDeliverServer(peerServer.Server(), abServer)
 
 	// Initialize chaincode service
-	chaincodeSupport, ccp, sccp, packageProvider := startChaincodeServer(peerHost, aclProvider, pr, opsSystem)
+	chaincodeSupport, ccp, sccp, packageProvider := startChaincodeServer(peerHost, aclProvider, pr, opsSystem, deployedCCInfoProvider)
 
 	logger.Debugf("Running peer")
 
@@ -621,6 +630,7 @@ func registerChaincodeSupport(
 	pr *platforms.Registry,
 	lifecycleSCC *lifecycle.SCC,
 	ops *operations.System,
+	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
 ) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider) {
 	//get user mode
 	userRunsCC := chaincode.IsDevMode()
@@ -667,6 +677,7 @@ func registerChaincodeSupport(
 		pr,
 		peer.DefaultSupport,
 		ops.Provider,
+		deployedCCInfoProvider,
 	)
 	ipRegistry.ChaincodeSupport = chaincodeSupport
 	ccp := chaincode.NewProvider(chaincodeSupport)
@@ -676,7 +687,7 @@ func registerChaincodeSupport(
 		ccSrv = authenticator.Wrap(ccSrv)
 	}
 
-	csccInst := cscc.New(ccp, sccp, aclProvider)
+	csccInst := cscc.New(ccp, sccp, aclProvider, deployedCCInfoProvider)
 	qsccInst := qscc.New(aclProvider)
 
 	//Now that chaincode is initialized, register all system chaincodes.
@@ -698,6 +709,7 @@ func startChaincodeServer(
 	aclProvider aclmgmt.ACLProvider,
 	pr *platforms.Registry,
 	ops *operations.System,
+	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
 ) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider, *persistence.PackageProvider) {
 	// Setup chaincode path
 	chaincodeInstallPath := ccprovider.GetChaincodeInstallPathFromViper()
@@ -715,7 +727,9 @@ func startChaincodeServer(
 	}
 
 	lifecycleSCC := &lifecycle.SCC{
-		Protobuf: &lifecycle.ProtobufImpl{},
+		Dispatcher: &dispatcher.Dispatcher{
+			Protobuf: &dispatcher.ProtobufImpl{},
+		},
 		Functions: &lifecycle.Lifecycle{
 			PackageParser:  ccPackageParser,
 			ChaincodeStore: ccStore,
@@ -740,6 +754,7 @@ func startChaincodeServer(
 		pr,
 		lifecycleSCC,
 		ops,
+		deployedCCInfoProvider,
 	)
 	go ccSrv.Start()
 	return chaincodeSupport, ccp, sccp, packageProvider
@@ -776,17 +791,20 @@ func startAdminServer(peerListenAddr string, peerServer *grpc.Server, metricsPro
 		if err != nil {
 			logger.Fatalf("Error loading secure config for admin service (%s)", err)
 		}
+		throttle := comm.NewThrottle(grpcMaxConcurrency)
 		serverConfig.Logger = flogging.MustGetLogger("core.comm").With("server", "AdminServer")
 		serverConfig.MetricsProvider = metricsProvider
 		serverConfig.UnaryInterceptors = append(
 			serverConfig.UnaryInterceptors,
 			grpcmetrics.UnaryServerInterceptor(grpcmetrics.NewUnaryMetrics(metricsProvider)),
 			grpclogging.UnaryServerInterceptor(flogging.MustGetLogger("comm.grpc.server").Zap()),
+			throttle.UnaryServerIntercptor,
 		)
 		serverConfig.StreamInterceptors = append(
 			serverConfig.StreamInterceptors,
 			grpcmetrics.StreamServerInterceptor(grpcmetrics.NewStreamMetrics(metricsProvider)),
 			grpclogging.StreamServerInterceptor(flogging.MustGetLogger("comm.grpc.server").Zap()),
+			throttle.StreamServerInterceptor,
 		)
 		adminServer, err := peer.NewPeerServer(adminListenAddress, serverConfig)
 		if err != nil {

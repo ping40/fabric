@@ -23,6 +23,7 @@ import (
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/flogging"
+	floggingmetrics "github.com/hyperledger/fabric/common/flogging/metrics"
 	"github.com/hyperledger/fabric/common/grpclogging"
 	"github.com/hyperledger/fabric/common/grpcmetrics"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
@@ -101,7 +102,7 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 	clusterDialer.SetConfig(clusterClientConfig)
 
 	r := &replicationInitiator{
-		logger:  logger,
+		logger:  flogging.MustGetLogger("orderer.common.cluster"),
 		secOpts: clusterClientConfig.SecOpts,
 		conf:    conf,
 		lf:      &ledgerFactory{lf},
@@ -119,6 +120,8 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 	}
 	defer opsSystem.Stop()
 	metricsProvider := opsSystem.Provider
+	logObserver := floggingmetrics.NewObserver(metricsProvider)
+	flogging.Global.SetObserver(logObserver)
 
 	serverConfig := initializeServerConfig(conf, metricsProvider)
 	grpcServer := initializeGrpcServer(conf, serverConfig)
@@ -488,7 +491,8 @@ func initializeLocalMsp(conf *localconfig.TopLevel) {
 	}
 }
 
-func initializeMultichannelRegistrar(bootstrapBlock *cb.Block,
+func initializeMultichannelRegistrar(
+	bootstrapBlock *cb.Block,
 	ri *replicationInitiator,
 	clusterDialer *cluster.PredicateDialer,
 	srvConf comm.ServerConfig,
@@ -497,7 +501,8 @@ func initializeMultichannelRegistrar(bootstrapBlock *cb.Block,
 	signer crypto.LocalSigner,
 	metricsProvider metrics.Provider,
 	lf blockledger.Factory,
-	callbacks ...func(bundle *channelconfig.Bundle)) *multichannel.Registrar {
+	callbacks ...channelconfig.BundleActor,
+) *multichannel.Registrar {
 	genesisBlock := extractBootstrapBlock(conf)
 	// Are we bootstrapping?
 	if len(lf.ChainIDs()) == 0 {
@@ -523,7 +528,8 @@ func initializeMultichannelRegistrar(bootstrapBlock *cb.Block,
 	return registrar
 }
 
-func initializeEtcdraftConsenter(consenters map[string]consensus.Consenter,
+func initializeEtcdraftConsenter(
+	consenters map[string]consensus.Consenter,
 	conf *localconfig.TopLevel,
 	lf blockledger.Factory,
 	clusterDialer *cluster.PredicateDialer,
@@ -531,7 +537,8 @@ func initializeEtcdraftConsenter(consenters map[string]consensus.Consenter,
 	ri *replicationInitiator,
 	srvConf comm.ServerConfig,
 	srv *comm.GRPCServer,
-	registrar *multichannel.Registrar) {
+	registrar *multichannel.Registrar,
+) {
 	replicationRefreshInterval := conf.General.Cluster.ReplicationBackgroundRefreshInterval
 	if replicationRefreshInterval == 0 {
 		replicationRefreshInterval = defaultReplicationBackgroundRefreshInterval
@@ -550,10 +557,11 @@ func initializeEtcdraftConsenter(consenters map[string]consensus.Consenter,
 	}
 
 	exponentialSleep := exponentialDurationSeries(replicationBackgroundInitialRefreshInterval, replicationRefreshInterval)
+	ticker := newTicker(exponentialSleep)
 
 	icr := &inactiveChainReplicator{
 		logger:                            logger,
-		scheduleChan:                      makeTickChannel(exponentialSleep, time.Sleep),
+		scheduleChan:                      ticker.C,
 		quitChan:                          make(chan struct{}),
 		replicator:                        ri,
 		chains2CreationCallbacks:          make(map[string]chainCreation),
