@@ -46,7 +46,7 @@ message ProcessedTransaction {
 }
 
 // TokenEndorserTransaction is for chaincode-based endorsement transactions
-// that use FabToken as payment settlement.
+// that use  as payment settlement.
 // It will be serialized as payload data in the envelope:
 //  Envelope
 //  |\_ Signature                                    (signature on the Payload message including

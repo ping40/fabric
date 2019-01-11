@@ -1,0 +1,27 @@
+@startuml
+
+class ProposalResponsePayload  {
+    ProposalHash []byte
+    Extension []byte
+}
+
+class ChaincodeAction {
+	Results []byte 读写集
+	Events []byte
+	Response *Response
+	ChaincodeId *ChaincodeID
+	TokenExpectation *token.TokenExpectation
+}
+
+ProposalResponsePayload ..> ChaincodeAction : Extension转化
+
+
+class ChaincodeEndorsedAction  {
+	ProposalResponsePayload []byte
+	Endorsements []*Endorsement
+}
+
+note top of ChaincodeEndorsedAction : 保存endorsement对一个\nproposal的处理结果
+
+ChaincodeEndorsedAction ..> ProposalResponsePayload : 转化
+@enduml

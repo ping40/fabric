@@ -21,7 +21,7 @@ class KVRWSet {
 	MetadataWrites []*KVMetadataWrite
 }
 
-NsReadWriteSet ..> KVRWSet : 转化的关系
+NsReadWriteSet ..> KVRWSet : Rwset转化的关系
 note top of KVRWSet: "NsReadWriteSet中\nRwset []byte 的内容"
 
 class CollectionHashedReadWriteSet {
@@ -61,4 +61,19 @@ class HashedRWSet {
 }
 
 CollHashedRwSet --> HashedRWSet
+
+
+class KVMetadataWrite {
+	Key string
+	Entries []*KVMetadataEntry
+}
+KVRWSet *-- KVMetadataWrite
+
+
+class KVMetadataEntry {
+	Name string
+	Value []byte
+}
+KVMetadataWrite *-- KVMetadataEntry
+
 @enduml
