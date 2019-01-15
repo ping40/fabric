@@ -263,7 +263,7 @@ func validateCommonHeader(hdr *common.Header) (*common.ChannelHeader, *common.Si
 
 	return chdr, shdr, nil
 }
-// jixu
+
 // validateConfigTransaction validates the payload of a
 // transaction assuming its type is CONFIG
 func validateConfigTransaction(data []byte, hdr *common.Header) error {
