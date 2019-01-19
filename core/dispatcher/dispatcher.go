@@ -20,7 +20,7 @@ type Dispatcher struct {
 	// Protobuf should pass through to Google Protobuf in production paths
 	Protobuf Protobuf
 }
-
+// jixu
 // Dispatch deserializes the input bytes to the correct type for the method in the receiver, then
 // if successful, marshals the output message to bytes and returns it.  On error, it simply returns
 // the error.  The method on the receiver must take a single parameter which is a concrete proto

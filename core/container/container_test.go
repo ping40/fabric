@@ -15,7 +15,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-var _ = Describe("Container", func() {
+var _ = Describe("Container", func() {// ginkgo 例子
 	Describe("VMCReqs", func() {
 		var (
 			fakeVM *mock.VM
@@ -47,7 +47,7 @@ var _ = Describe("Container", func() {
 					err := startReq.Do(fakeVM)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(fakeVM.StartCallCount()).To(Equal(1))
-					ccid, args, env, filesToUpload, builder := fakeVM.StartArgsForCall(0)
+					ccid, args, env, filesToUpload, builder := fakeVM.StartArgsForCall(0)//获取调用参数
 					Expect(ccid).To(Equal(ccintf.CCID{Name: "start-name"}))
 					Expect(args).To(Equal([]string{"foo", "bar"}))
 					Expect(env).To(Equal([]string{"Bar", "Foo"}))
@@ -59,7 +59,7 @@ var _ = Describe("Container", func() {
 
 				Context("when the vm provider fails", func() {
 					It("returns the error", func() {
-						fakeVM.StartReturns(errors.New("Boo"))
+						fakeVM.StartReturns(errors.New("Boo")) // 设置返回值
 						err := startReq.Do(fakeVM)
 						Expect(err).To(MatchError("Boo"))
 					})
@@ -141,7 +141,7 @@ var _ = Describe("Container", func() {
 
 			Context("the request is for an unknown VM provider type", func() {
 				It("causes the system to halt as this is a serious bug", func() {
-					Expect(func() { vmController.Process("Unknown-Type", nil) }).To(Panic())
+					Expect(func() { vmController.Process("Unknown-Type", nil) }).To(Panic())// panic检测
 					Expect(vmProvider.NewVMCallCount()).To(Equal(0))
 				})
 			})

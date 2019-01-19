@@ -16,7 +16,7 @@ import (
 // LoadTestMSPSetup sets up the local MSP
 // and a chain MSP for the default chain
 func LoadMSPSetupForTesting() error {
-	dir, err := configtest.GetDevMspDir()
+	dir, err := configtest.GetDevMspDir() //sampleconfig/msp  获取信息
 	if err != nil {
 		return err
 	}

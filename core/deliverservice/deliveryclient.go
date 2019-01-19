@@ -234,7 +234,7 @@ func (d *deliverServiceImpl) newClient(chainID string, ledgerInfoProvider blocks
 
 func DefaultConnectionFactory(channelID string) func(endpoint string) (*grpc.ClientConn, error) {
 	return func(endpoint string) (*grpc.ClientConn, error) {
-		dialOpts := []grpc.DialOption{grpc.WithBlock()}
+		dialOpts := []grpc.DialOption{grpc.WithBlock()}//阻塞模式
 		// set max send/recv msg sizes
 		dialOpts = append(dialOpts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(comm.MaxRecvMsgSize),
 			grpc.MaxCallSendMsgSize(comm.MaxSendMsgSize)))
@@ -251,7 +251,7 @@ func DefaultConnectionFactory(channelID string) func(endpoint string) (*grpc.Cli
 		dialOpts = append(dialOpts, comm.ClientKeepaliveOptions(kaOpts)...)
 
 		if viper.GetBool("peer.tls.enabled") {
-			creds, err := comm.GetCredentialSupport().GetDeliverServiceCredentials(channelID)
+			creds, err := comm.GetCredentialSupport().GetDeliverServiceCredentials(channelID)// 不清楚
 			if err != nil {
 				return nil, fmt.Errorf("failed obtaining credentials for channel %s: %v", channelID, err)
 			}

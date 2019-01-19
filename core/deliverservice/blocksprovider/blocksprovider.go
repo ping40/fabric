@@ -116,7 +116,7 @@ func NewBlocksProvider(chainID string, client streamClient, gossip GossipService
 }
 
 // DeliverBlocks used to pull out blocks from the ordering service to
-// distributed them across peers
+// distributed them across peers 业务的大入口
 func (b *blocksProviderImpl) DeliverBlocks() {
 	errorStatusCounter := 0
 	statusCounter := 0
@@ -179,7 +179,7 @@ func (b *blocksProviderImpl) DeliverBlocks() {
 
 			logger.Debugf("[%s] Adding payload to local buffer, blockNum = [%d]", b.chainID, blockNum)
 			// Add payload to local state payloads buffer
-			if err := b.gossip.AddPayload(b.chainID, payload); err != nil {
+			if err := b.gossip.AddPayload(b.chainID, payload); err != nil {// 作用？
 				logger.Warningf("Block [%d] received from ordering service wasn't added to payload buffer: %v", blockNum, err)
 			}
 

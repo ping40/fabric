@@ -1,0 +1,1 @@
+q: 一个公司内的peer节点如何从anchor那里获取block？
