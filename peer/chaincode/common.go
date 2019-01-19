@@ -20,7 +20,6 @@ import (
 	"github.com/hyperledger/fabric/common/cauthdsl"
 	"github.com/hyperledger/fabric/common/localmsp"
 	"github.com/hyperledger/fabric/common/util"
-	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/container"
 	"github.com/hyperledger/fabric/msp"
@@ -49,7 +48,7 @@ func checkSpec(spec *pb.ChaincodeSpec) error {
 // getChaincodeDeploymentSpec get chaincode deployment spec given the chaincode spec
 func getChaincodeDeploymentSpec(spec *pb.ChaincodeSpec, crtPkg bool) (*pb.ChaincodeDeploymentSpec, error) {
 	var codePackageBytes []byte
-	if chaincode.IsDevMode() == false && crtPkg {
+	if crtPkg {
 		var err error
 		if err = checkSpec(spec); err != nil {
 			return nil, err
@@ -153,12 +152,13 @@ func chaincodeInvokeOrQuery(cmd *cobra.Command, invoke bool, cf *ChaincodeCmdFac
 }
 
 type collectionConfigJson struct {
-	Name           string `json:"name"`
-	Policy         string `json:"policy"`
-	RequiredCount  int32  `json:"requiredPeerCount"`
-	MaxPeerCount   int32  `json:"maxPeerCount"`
-	BlockToLive    uint64 `json:"blockToLive"`
-	MemberOnlyRead bool   `json:"memberOnlyRead"`
+	Name            string `json:"name"`
+	Policy          string `json:"policy"`
+	RequiredCount   int32  `json:"requiredPeerCount"`
+	MaxPeerCount    int32  `json:"maxPeerCount"`
+	BlockToLive     uint64 `json:"blockToLive"`
+	MemberOnlyRead  bool   `json:"memberOnlyRead"`
+	MemberOnlyWrite bool   `json:"memberOnlyWrite"`
 }
 
 // getCollectionConfig retrieves the collection configuration
@@ -205,6 +205,7 @@ func getCollectionConfigFromBytes(cconfBytes []byte) ([]byte, error) {
 					MaximumPeerCount:  cconfitem.MaxPeerCount,
 					BlockToLive:       cconfitem.BlockToLive,
 					MemberOnlyRead:    cconfitem.MemberOnlyRead,
+					MemberOnlyWrite:   cconfitem.MemberOnlyWrite,
 				},
 			},
 		}
