@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/hyperledger/fabric/bccsp/factory"
+	"github.com/hyperledger/fabric/common/metrics/disabled"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/discovery"
+	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/util"
 	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +36,7 @@ func init() {
 }
 
 type configurableCryptoService struct {
+	sync.RWMutex
 	m map[string]api.OrgIdentityType
 }
 
@@ -43,13 +46,17 @@ func (c *configurableCryptoService) Expiration(peerIdentity api.PeerIdentityType
 
 func (c *configurableCryptoService) putInOrg(port int, org string) {
 	identity := fmt.Sprintf("localhost:%d", port)
+	c.Lock()
 	c.m[identity] = api.OrgIdentityType(org)
+	c.Unlock()
 }
 
 // OrgByPeerIdentity returns the OrgIdentityType
 // of a given peer identity
 func (c *configurableCryptoService) OrgByPeerIdentity(identity api.PeerIdentityType) api.OrgIdentityType {
+	c.RLock()
 	org := c.m[string(identity)]
+	c.RUnlock()
 	return org
 }
 
@@ -115,7 +122,7 @@ func newGossipInstanceWithExternalEndpoint(portPrefix int, id int, mcs *configur
 	}
 	selfID := api.PeerIdentityType(conf.InternalEndpoint)
 	g := NewGossipServiceWithServer(conf, mcs, mcs, selfID,
-		nil)
+		nil, metrics.NewGossipMetrics(&disabled.Provider{}))
 
 	return g
 }

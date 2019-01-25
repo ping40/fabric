@@ -34,6 +34,7 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
 	lutils "github.com/hyperledger/fabric/core/ledger/util"
 	mocktxvalidator "github.com/hyperledger/fabric/core/mocks/txvalidator"
+	"github.com/hyperledger/fabric/core/scc/lscc"
 	mocks2 "github.com/hyperledger/fabric/discovery/support/mocks"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/msp/mgmt"
@@ -241,6 +242,7 @@ func setupValidatorWithMspMgr(mspmgr msp.MSPManager, mockID *mocks2.Identity) (*
 		semaphore.New(10),
 		&mocktxvalidator.Support{ACVal: v20Capabilities(), MSPManagerVal: mspmgr},
 		mockLedger,
+		&lscc.LifeCycleSysCC{},
 		mp,
 		pm,
 	)
@@ -740,44 +742,6 @@ func TestInvokeOKPvtMetaUpdateOnly(t *testing.T) {
 	assertInvalid(b, t, peer.TxValidationCode_ENDORSEMENT_POLICY_FAILURE)
 }
 
-func TestInvokeOKSCC(t *testing.T) {
-	v, mockQE, _ := setupValidator()
-	mockQE.On("GetStateMetadata", "lscc", "cc").Return(nil, nil)
-	mockQE.On("GetStateMultipleKeys", "lscc", []string{"cc"}).Return(nil, nil)
-	mockQE.On("GetStateMultipleKeys", "lscc", []string{"cc~collection"}).Return(nil, nil)
-
-	cds := utils.MarshalOrPanic(&peer.ChaincodeDeploymentSpec{
-		ChaincodeSpec: &peer.ChaincodeSpec{
-			Type:        peer.ChaincodeSpec_GOLANG,
-			ChaincodeId: &peer.ChaincodeID{Name: "cc", Version: "ver"},
-			Input:       &peer.ChaincodeInput{},
-		},
-	})
-	cis := &peer.ChaincodeInvocationSpec{
-		ChaincodeSpec: &peer.ChaincodeSpec{
-			ChaincodeId: &peer.ChaincodeID{Name: "lscc", Version: ccVersion},
-			Input:       &peer.ChaincodeInput{Args: [][]byte{[]byte("deploy"), []byte(util.GetTestChainID()), cds}},
-			Type:        peer.ChaincodeSpec_GOLANG}}
-
-	prop, _, err := utils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, signerSerialized)
-	assert.NoError(t, err)
-	rwsetBuilder := rwsetutil.NewRWSetBuilder()
-	rwsetBuilder.AddToWriteSet("lscc", "cc", utils.MarshalOrPanic(&ccp.ChaincodeData{Name: "cc", Version: "ver", InstantiationPolicy: cauthdsl.MarshaledAcceptAllPolicy}))
-	rwset, err := rwsetBuilder.GetTxSimulationResults()
-	assert.NoError(t, err)
-	rwsetBytes, err := rwset.GetPubSimulationBytes()
-	assert.NoError(t, err)
-	presp, err := utils.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, rwsetBytes, nil, &peer.ChaincodeID{Name: "lscc", Version: ccVersion}, nil, signer)
-	assert.NoError(t, err)
-	tx, err := utils.CreateSignedTx(prop, signer, presp)
-	assert.NoError(t, err)
-	b := &common.Block{Data: &common.BlockData{Data: [][]byte{utils.MarshalOrPanic(tx)}}, Header: &common.BlockHeader{Number: 1}}
-
-	err = v.Validate(b)
-	assert.NoError(t, err)
-	assertValid(b, t)
-}
-
 func TestInvokeNOKWritesToLSCC(t *testing.T) {
 	ccID := "mycc"
 
@@ -853,29 +817,6 @@ func TestInvokeNOKInvokesEmptyCCName(t *testing.T) {
 	err := v.Validate(b)
 	assert.NoError(t, err)
 	assertInvalid(b, t, peer.TxValidationCode_INVALID_OTHER_REASON)
-}
-
-func TestInvokeNOKExpiredCC(t *testing.T) {
-	ccID := "mycc"
-
-	v, mockQE, _ := setupValidator()
-
-	mockQE.On("GetState", "lscc", ccID).Return(utils.MarshalOrPanic(&ccp.ChaincodeData{
-		Name:    ccID,
-		Version: "badversion",
-		Vscc:    "vscc",
-		Policy:  signedByAnyMember([]string{"SampleOrg"}),
-	}), nil)
-
-	tx := getEnv(ccID, nil, createRWset(t, ccID), t)
-	b := &common.Block{
-		Data:   &common.BlockData{Data: [][]byte{utils.MarshalOrPanic(tx)}},
-		Header: &common.BlockHeader{},
-	}
-
-	err := v.Validate(b)
-	assert.NoError(t, err)
-	assertInvalid(b, t, peer.TxValidationCode_EXPIRED_CHAINCODE)
 }
 
 func TestInvokeNOKBogusActions(t *testing.T) {
@@ -1168,6 +1109,7 @@ func TestValidationInvalidEndorsing(t *testing.T) {
 		semaphore.New(10),
 		&mocktxvalidator.Support{ACVal: v20Capabilities(), MSPManagerVal: mspmgr},
 		mockLedger,
+		&lscc.LifeCycleSysCC{},
 		mp,
 		pm,
 	)
@@ -1235,6 +1177,7 @@ func TestValidationPluginExecutionError(t *testing.T) {
 		semaphore.New(10),
 		&mocktxvalidator.Support{ACVal: v20Capabilities(), MSPManagerVal: mspmgr},
 		mockLedger,
+		&lscc.LifeCycleSysCC{},
 		mp,
 		pm,
 	)
@@ -1281,6 +1224,7 @@ func TestValidationPluginNotFound(t *testing.T) {
 		semaphore.New(10),
 		&mocktxvalidator.Support{ACVal: v20Capabilities(), MSPManagerVal: mspmgr},
 		mockLedger,
+		&lscc.LifeCycleSysCC{},
 		mp,
 		pm,
 	)

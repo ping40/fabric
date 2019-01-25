@@ -262,7 +262,7 @@ func serve(args []string) error {
 	pb.RegisterDeliverServer(peerServer.Server(), abServer)
 
 	// Initialize chaincode service
-	chaincodeSupport, ccp, sccp, packageProvider := startChaincodeServer(peerHost, aclProvider, pr, opsSystem, deployedCCInfoProvider)
+	chaincodeSupport, ccp, sccp, packageProvider, lsccInst := startChaincodeServer(peerHost, aclProvider, pr, opsSystem, deployedCCInfoProvider)
 
 	logger.Debugf("Running peer")
 
@@ -314,7 +314,7 @@ func serve(args []string) error {
 	policyMgr := peer.NewChannelPolicyManagerGetter()
 
 	// Initialize gossip component
-	err = initGossipService(policyMgr, peerServer, serializedIdentity, peerEndpoint.Address)
+	err = initGossipService(policyMgr, metricsProvider, peerServer, serializedIdentity, peerEndpoint.Address)
 	if err != nil {
 		return err
 	}
@@ -356,7 +356,7 @@ func serve(args []string) error {
 		}
 		cceventmgmt.GetMgr().Register(cid, sub)
 	}, ccp, sccp, plugin.MapBasedMapper(validationPluginsByName),
-		pr, deployedCCInfoProvider, membershipInfoProvider, metricsProvider)
+		pr, deployedCCInfoProvider, membershipInfoProvider, metricsProvider, lsccInst)
 
 	if viper.GetBool("peer.discovery.enabled") {
 		registerDiscoveryService(peerServer, policyMgr, lifecycle)
@@ -538,6 +538,7 @@ func createChaincodeServer(ca tlsgen.CA, peerHostname string) (srv *comm.GRPCSer
 		ServerMinInterval: time.Duration(1) * time.Minute,  // match ClientInterval
 	}
 	config.KaOpts = chaincodeKeepaliveOptions
+	config.HealthCheckEnabled = true
 
 	srv, err = comm.NewGRPCServer(cclistenAddress, config)
 	if err != nil {
@@ -632,7 +633,7 @@ func registerChaincodeSupport(
 	lifecycleSCC *lifecycle.SCC,
 	ops *operations.System,
 	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
-) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider) {
+) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider, *lscc.LifeCycleSysCC) {
 	//get user mode
 	userRunsCC := chaincode.IsDevMode()
 	tlsEnabled := viper.GetBool("peer.tls.enabled")
@@ -688,7 +689,7 @@ func registerChaincodeSupport(
 		ccSrv = authenticator.Wrap(ccSrv)
 	}
 
-	csccInst := cscc.New(ccp, sccp, aclProvider, deployedCCInfoProvider)
+	csccInst := cscc.New(ccp, sccp, aclProvider, deployedCCInfoProvider, lsccInst)
 	qsccInst := qscc.New(aclProvider)
 
 	//Now that chaincode is initialized, register all system chaincodes.
@@ -698,7 +699,7 @@ func registerChaincodeSupport(
 	}
 	pb.RegisterChaincodeSupportServer(grpcServer.Server(), ccSrv)
 
-	return chaincodeSupport, ccp, sccp
+	return chaincodeSupport, ccp, sccp, lsccInst
 }
 
 // startChaincodeServer will finish chaincode related initialization, including:
@@ -711,7 +712,7 @@ func startChaincodeServer(
 	pr *platforms.Registry,
 	ops *operations.System,
 	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
-) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider, *persistence.PackageProvider) {
+) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider, *persistence.PackageProvider, *lscc.LifeCycleSysCC) {
 	// Setup chaincode path
 	chaincodeInstallPath := ccprovider.GetChaincodeInstallPathFromViper()
 	ccprovider.SetChaincodesPath(chaincodeInstallPath)
@@ -727,6 +728,8 @@ func startChaincodeServer(
 		Store:    ccStore,
 	}
 
+	mspID := viper.GetString("peer.localMspId")
+
 	lifecycleSCC := &lifecycle.SCC{
 		Dispatcher: &dispatcher.Dispatcher{
 			Protobuf: &dispatcher.ProtobufImpl{},
@@ -735,6 +738,7 @@ func startChaincodeServer(
 			PackageParser:  ccPackageParser,
 			ChaincodeStore: ccStore,
 		},
+		OrgMSPID: mspID,
 	}
 
 	// Create a self-signed CA for chaincode service
@@ -746,7 +750,7 @@ func startChaincodeServer(
 	if err != nil {
 		logger.Panicf("Failed to create chaincode server: %s", err)
 	}
-	chaincodeSupport, ccp, sccp := registerChaincodeSupport(
+	chaincodeSupport, ccp, sccp, lsccInst := registerChaincodeSupport(
 		ccSrv,
 		ccEndpoint,
 		ca,
@@ -758,7 +762,28 @@ func startChaincodeServer(
 		deployedCCInfoProvider,
 	)
 	go ccSrv.Start()
-	return chaincodeSupport, ccp, sccp, packageProvider
+
+	// register HealthChecker
+	certPair, err := ca.NewClientCertKeyPair()
+	if err != nil {
+		logger.Panicf("Failed to create key pair for health checker: %s", err)
+	}
+	clientConfig := comm.ClientConfig{
+		SecOpts: &comm.SecureOptions{
+			UseTLS:            ccSrv.TLSEnabled(),
+			RequireClientCert: ccSrv.MutualTLSRequired(),
+			Certificate:       certPair.Cert,
+			Key:               certPair.Key,
+			ServerRootCAs:     [][]byte{ca.CertBytes()},
+		},
+		Timeout: 10 * time.Second,
+	}
+	hcc, err := comm.NewHealthCheckClient(clientConfig, ccEndpoint, "")
+	if err != nil {
+		logger.Panicf("Failed to create health checker: %s", err)
+	}
+	ops.RegisterChecker("chaincodeServer", hcc)
+	return chaincodeSupport, ccp, sccp, packageProvider, lsccInst
 }
 
 func adminHasSeparateListener(peerListenAddr string, adminListenAddress string) bool {
@@ -852,7 +877,8 @@ func secureDialOpts() []grpc.DialOption {
 // 2. Init the message crypto service;
 // 3. Init the security advisor;
 // 4. Init gossip related struct.
-func initGossipService(policyMgr policies.ChannelPolicyManagerGetter, peerServer *comm.GRPCServer, serializedIdentity []byte, peerAddr string) error {
+func initGossipService(policyMgr policies.ChannelPolicyManagerGetter, metricsProvider metrics.Provider,
+	peerServer *comm.GRPCServer, serializedIdentity []byte, peerAddr string) error {
 	var certs *gossipcommon.TLSCertificates
 	if peerServer.TLSEnabled() {
 		serverCert := peerServer.ServerCertificate()
@@ -875,6 +901,7 @@ func initGossipService(policyMgr policies.ChannelPolicyManagerGetter, peerServer
 
 	return service.InitGossipService(
 		serializedIdentity,
+		metricsProvider,
 		peerAddr,
 		peerServer.Server(),
 		certs,

@@ -117,7 +117,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestConfigerInit(t *testing.T) {
-	e := New(nil, nil, mockAclProvider, nil)
+	e := New(nil, nil, mockAclProvider, nil, nil)
 	stub := shim.NewMockStub("PeerConfiger", e)
 
 	if res := stub.MockInit("1", nil); res.Status != shim.OK {
@@ -127,7 +127,7 @@ func TestConfigerInit(t *testing.T) {
 }
 
 func TestConfigerInvokeInvalidParameters(t *testing.T) {
-	e := New(nil, nil, mockAclProvider, nil)
+	e := New(nil, nil, mockAclProvider, nil, nil)
 	stub := shim.NewMockStub("PeerConfiger", e)
 
 	res := stub.MockInit("1", nil)
@@ -137,6 +137,8 @@ func TestConfigerInvokeInvalidParameters(t *testing.T) {
 	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail having zero arguments")
 	assert.Equal(t, res.Message, "Incorrect number of arguments, 0")
 
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_GetChannels, "", (*pb.SignedProposal)(nil)).Return(errors.New("Failed authorization"))
 	args := [][]byte{[]byte("GetChannels")}
 	res = stub.MockInvokeWithSignedProposal("3", args, nil)
 	assert.Equal(t, res.Status, int32(shim.ERROR), "CSCC invoke expected to fail no signed proposal provided")
@@ -161,7 +163,7 @@ func TestConfigerInvokeJoinChainMissingParams(t *testing.T) {
 	os.Mkdir("/tmp/hyperledgertest", 0755)
 	defer os.RemoveAll("/tmp/hyperledgertest/")
 
-	e := New(nil, nil, mockAclProvider, nil)
+	e := New(nil, nil, mockAclProvider, nil, nil)
 	stub := shim.NewMockStub("PeerConfiger", e)
 
 	if res := stub.MockInit("1", nil); res.Status != shim.OK {
@@ -170,6 +172,8 @@ func TestConfigerInvokeJoinChainMissingParams(t *testing.T) {
 	}
 
 	// Failed path: expected to have at least one argument
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_JoinChain, "", (*pb.SignedProposal)(nil)).Return(nil)
 	args := [][]byte{[]byte("JoinChain")}
 	if res := stub.MockInvoke("2", args); res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain should have failed with invalid number of args: %v", args)
@@ -182,7 +186,7 @@ func TestConfigerInvokeJoinChainWrongParams(t *testing.T) {
 	os.Mkdir("/tmp/hyperledgertest", 0755)
 	defer os.RemoveAll("/tmp/hyperledgertest/")
 
-	e := New(nil, nil, mockAclProvider, nil)
+	e := New(nil, nil, mockAclProvider, nil, nil)
 	stub := shim.NewMockStub("PeerConfiger", e)
 
 	if res := stub.MockInit("1", nil); res.Status != shim.OK {
@@ -191,6 +195,8 @@ func TestConfigerInvokeJoinChainWrongParams(t *testing.T) {
 	}
 
 	// Failed path: wrong parameter type
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_JoinChain, "", (*pb.SignedProposal)(nil)).Return(nil)
 	args := [][]byte{[]byte("JoinChain"), []byte("action")}
 	if res := stub.MockInvoke("2", args); res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain should have failed with null genesis block.  args: %v", args)
@@ -210,7 +216,7 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	defer ledgermgmt.CleanupTestEnv()
 	defer os.RemoveAll("/tmp/hyperledgertest/")
 
-	e := New(ccp, mp, mockAclProvider, nil)
+	e := New(ccp, mp, mockAclProvider, nil, nil)
 	stub := shim.NewMockStub("PeerConfiger", e)
 
 	peerEndpoint := "localhost:13611"
@@ -268,7 +274,8 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	identity, _ := mgmt.GetLocalSigningIdentityOrPanic().Serialize()
 	messageCryptoService := peergossip.NewMCS(&mocks.ChannelPolicyManagerGetter{}, localmsp.NewSigner(), mgmt.NewDeserializersManager())
 	secAdv := peergossip.NewSecurityAdvisor(mgmt.NewDeserializersManager())
-	err := service.InitGossipServiceCustomDeliveryFactory(identity, peerEndpoint, nil, nil, &mockDeliveryClientFactory{}, messageCryptoService, secAdv, nil)
+	err := service.InitGossipServiceCustomDeliveryFactory(identity, &disabled.Provider{}, peerEndpoint, nil, nil,
+		&mockDeliveryClientFactory{}, messageCryptoService, secAdv, nil)
 	assert.NoError(t, err)
 
 	// Successful path for JoinChain
@@ -282,6 +289,8 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	sProp.Signature = sProp.ProposalBytes
 
 	// Try fail path with nil block
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_JoinChain, "", sProp).Return(nil)
 	res := stub.MockInvokeWithSignedProposal("2", [][]byte{[]byte("JoinChain"), nil}, sProp)
 	assert.Equal(t, res.Status, int32(shim.ERROR))
 
@@ -295,6 +304,8 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 			Data: [][]byte{env},
 		},
 	}
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_JoinChain, "", sProp).Return(nil)
 	badBlockBytes := utils.MarshalOrPanic(badBlock)
 	res = stub.MockInvokeWithSignedProposal("2", [][]byte{[]byte("JoinChain"), badBlockBytes}, sProp)
 	assert.Equal(t, res.Status, int32(shim.ERROR))
@@ -306,6 +317,8 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 
 	// This call must fail
 	sProp.Signature = nil
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_JoinChain, "", sProp).Return(errors.New("Failed authorization"))
 	res = stub.MockInvokeWithSignedProposal("3", args, sProp)
 	if res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain must fail : %v", res.Message)
@@ -339,6 +352,8 @@ func TestConfigerInvokeJoinChainCorrectParams(t *testing.T) {
 	}
 
 	// get channels for the peer
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_GetChannels, "", sProp).Return(nil)
 	args = [][]byte{[]byte(GetChannels)}
 	res = stub.MockInvokeWithSignedProposal("2", args, sProp)
 	if res.Status != shim.OK {
@@ -499,7 +514,7 @@ func TestPeerConfiger_SubmittingOrdererGenesis(t *testing.T) {
 	os.Mkdir("/tmp/hyperledgertest", 0755)
 	defer os.RemoveAll("/tmp/hyperledgertest/")
 
-	e := New(nil, nil, nil, nil)
+	e := New(nil, nil, nil, nil, nil)
 	stub := shim.NewMockStub("PeerConfiger", e)
 
 	if res := stub.MockInit("1", nil); res.Status != shim.OK {
@@ -515,6 +530,8 @@ func TestPeerConfiger_SubmittingOrdererGenesis(t *testing.T) {
 	blockBytes := utils.MarshalOrPanic(block)
 
 	// Failed path: wrong parameter type
+	mockAclProvider.Reset()
+	mockAclProvider.On("CheckACL", resources.Cscc_JoinChain, "", (*pb.SignedProposal)(nil)).Return(nil)
 	args := [][]byte{[]byte("JoinChain"), []byte(blockBytes)}
 	if res := stub.MockInvoke("2", args); res.Status == shim.OK {
 		t.Fatalf("cscc invoke JoinChain should have failed with wrong genesis block.  args: %v", args)

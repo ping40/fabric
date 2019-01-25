@@ -7,7 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 package etcdraft_test
 
 import (
-	"bytes"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
@@ -19,6 +18,7 @@ import (
 
 	"code.cloudfoundry.org/clock/fakeclock"
 	"github.com/coreos/etcd/raft"
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
@@ -89,7 +89,7 @@ var _ = Describe("Chain", func() {
 			support           *consensusmocks.FakeConsenterSupport
 			cutter            *mockblockcutter.Receiver
 			storage           *raft.MemoryStorage
-			observeC          chan uint64
+			observeC          chan raft.SoftState
 			chain             *etcdraft.Chain
 			dataDir           string
 			walDir            string
@@ -108,7 +108,7 @@ var _ = Describe("Chain", func() {
 			walDir = path.Join(dataDir, "wal")
 			snapDir = path.Join(dataDir, "snapshot")
 
-			observeC = make(chan uint64, 1)
+			observeC = make(chan raft.SoftState, 1)
 
 			support = &consensusmocks.FakeConsenterSupport{}
 			support.ChainIDReturns(channelID)
@@ -150,12 +150,12 @@ var _ = Describe("Chain", func() {
 			}
 		})
 
-		campaign := func(clock *fakeclock.FakeClock, observeC <-chan uint64) {
+		campaign := func(clock *fakeclock.FakeClock, observeC <-chan raft.SoftState) {
 			Eventually(func() bool {
 				clock.Increment(interval)
 				select {
-				case <-observeC:
-					return true
+				case s := <-observeC:
+					return s.RaftState == raft.StateLeader
 				default:
 					return false
 				}
@@ -356,9 +356,10 @@ var _ = Describe("Chain", func() {
 			})
 
 			It("unblocks Errored if chain is halted", func() {
-				Expect(chain.Errored()).NotTo(Receive())
+				errorC := chain.Errored()
+				Expect(errorC).NotTo(BeClosed())
 				chain.Halt()
-				Expect(chain.Errored()).Should(BeClosed())
+				Eventually(errorC).Should(BeClosed())
 			})
 
 			Describe("Config updates", func() {
@@ -1407,10 +1408,10 @@ var _ = Describe("Chain", func() {
 					// to leader's node list right away. An immediate tick does not trigger a heartbeat
 					// being sent to node 4. Therefore, we repeatedly tick the leader until node 4 joins
 					// the cluster successfully.
-					Eventually(func() <-chan uint64 {
+					Eventually(func() <-chan raft.SoftState {
 						c1.clock.Increment(interval)
 						return c4.observe
-					}, defaultTimeout).Should(Receive(Equal(uint64(1))))
+					}, defaultTimeout).Should(Receive(Equal(raft.SoftState{Lead: 1, RaftState: raft.StateFollower})))
 
 					Eventually(c4.support.WriteBlockCallCount, defaultTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, defaultTimeout).Should(Equal(1))
@@ -1466,10 +1467,10 @@ var _ = Describe("Chain", func() {
 					// to leader's node list right away. An immediate tick does not trigger a heartbeat
 					// being sent to node 4. Therefore, we repeatedly tick the leader until node 4 joins
 					// the cluster successfully.
-					Eventually(func() <-chan uint64 {
+					Eventually(func() <-chan raft.SoftState {
 						c1.clock.Increment(interval)
 						return c4.observe
-					}).Should(Receive(Equal(uint64(1))))
+					}, defaultTimeout).Should(Receive(Equal(raft.SoftState{Lead: 1, RaftState: raft.StateFollower})))
 
 					Eventually(c4.support.WriteBlockCallCount, defaultTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, defaultTimeout).Should(Equal(1))
@@ -1486,10 +1487,10 @@ var _ = Describe("Chain", func() {
 					network.connect(2)
 
 					// make sure second node see 4th as a leader
-					Eventually(func() <-chan uint64 {
+					Eventually(func() <-chan raft.SoftState {
 						c4.clock.Increment(interval)
 						return c2.observe
-					}, defaultTimeout).Should(Receive(Equal(uint64(4))))
+					}, defaultTimeout).Should(Receive(Equal(raft.SoftState{Lead: 4, RaftState: raft.StateFollower})))
 
 					By("submitting new transaction to re-connected node")
 					c4.cutter.CutNext = true
@@ -1553,10 +1554,10 @@ var _ = Describe("Chain", func() {
 					// to leader's node list right away. An immediate tick does not trigger a heartbeat
 					// being sent to node 4. Therefore, we repeatedly tick the leader until node 4 joins
 					// the cluster successfully.
-					Eventually(func() <-chan uint64 {
+					Eventually(func() <-chan raft.SoftState {
 						c2.clock.Increment(interval)
 						return c4.observe
-					}, LongEventualTimeout).Should(Receive(Equal(uint64(2))))
+					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 2, RaftState: raft.StateFollower})))
 
 					Eventually(c4.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
@@ -1579,7 +1580,7 @@ var _ = Describe("Chain", func() {
 					c2.clock.Increment(interval)
 					// check that former leader didn't get stuck and actually got resign signal,
 					// and once connected capable of communicating with rest of the replicas set
-					Eventually(c1.observe, LongEventualTimeout).Should(Receive(Equal(uint64(2))))
+					Eventually(c1.observe, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 2, RaftState: raft.StateFollower})))
 					Eventually(c1.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 				})
 
@@ -1591,9 +1592,9 @@ var _ = Describe("Chain", func() {
 					configEnv := newConfigEnv(channelID, common.HeaderType_CONFIG, newConfigUpdateEnv(channelID, addConsenterConfigValue()))
 					c1.cutter.CutNext = true
 
-					step := c1.rpc.StepStub
+					step1 := c1.getStepFunc()
 					count := c1.rpc.StepCallCount() // record current step call count
-					c1.rpc.StepStub = func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+					c1.setStepFunc(func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
 						// disconnect network after 4 MsgApp are sent by c1:
 						// - 2 MsgApp to c2 & c3 that replicate data to raft followers
 						// - 2 MsgApp to c2 & c3 that instructs followers to commit data
@@ -1605,8 +1606,8 @@ var _ = Describe("Chain", func() {
 							}()
 						}
 
-						return step(dest, msg)
-					}
+						return step1(dest, msg)
+					})
 
 					By("sending config transaction")
 					err := c1.Configure(configEnv, 0)
@@ -1644,10 +1645,10 @@ var _ = Describe("Chain", func() {
 					network.elect(2)
 
 					By("confirm new node observed a leader node")
-					Eventually(func() <-chan uint64 {
+					Eventually(func() <-chan raft.SoftState {
 						c2.clock.Increment(interval)
 						return c4.observe
-					}, LongEventualTimeout).Should(Receive(Equal(uint64(2))))
+					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 2, RaftState: raft.StateFollower})))
 
 					Eventually(c4.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
@@ -1738,6 +1739,7 @@ var _ = Describe("Chain", func() {
 
 					// Assert c1 has exited
 					Eventually(c1.Errored, LongEventualTimeout).Should(BeClosed())
+					close(c1.stopped)
 
 					By("making sure remaining two nodes will elect new leader")
 
@@ -1828,6 +1830,100 @@ var _ = Describe("Chain", func() {
 					})
 			})
 
+			When("MaxInflightMsgs is reached", func() {
+				BeforeEach(func() {
+					network.exec(func(c *chain) { c.opts.MaxInflightMsgs = 1 })
+				})
+
+				It("waits for in flight blocks to be committed", func() {
+					c1.cutter.CutNext = true
+					// disconnect c1 to disrupt consensus
+					network.disconnect(1)
+
+					Expect(c1.Order(env, 0)).To(Succeed())
+
+					doneProp := make(chan struct{})
+					go func() {
+						Expect(c1.Order(env, 0)).To(Succeed())
+						close(doneProp)
+					}()
+					// expect second `Order` to block
+					Consistently(doneProp).ShouldNot(BeClosed())
+					network.exec(func(c *chain) {
+						Consistently(c.support.WriteBlockCallCount).Should(BeZero())
+					})
+
+					network.connect(1)
+					c1.clock.Increment(interval)
+
+					Eventually(doneProp).Should(BeClosed())
+					network.exec(func(c *chain) {
+						Eventually(c.support.WriteBlockCallCount).Should(Equal(2))
+					})
+				})
+
+				It("resets block in flight when steps down from leader", func() {
+					c1.cutter.CutNext = true
+					c2.cutter.CutNext = true
+					// disconnect c1 to disrupt consensus
+					network.disconnect(1)
+
+					Expect(c1.Order(env, 0)).To(Succeed())
+
+					doneProp := make(chan struct{})
+					go func() {
+						defer GinkgoRecover()
+
+						Expect(c1.Order(env, 0)).To(Succeed())
+						close(doneProp)
+					}()
+					// expect second `Order` to block
+					Consistently(doneProp).ShouldNot(BeClosed())
+					network.exec(func(c *chain) {
+						Consistently(c.support.WriteBlockCallCount).Should(BeZero())
+					})
+
+					network.elect(2)
+					Expect(c3.Order(env, 0)).To(Succeed())
+					Eventually(c1.support.WriteBlockCallCount).Should(Equal(0))
+					Eventually(c2.support.WriteBlockCallCount).Should(Equal(1))
+					Eventually(c3.support.WriteBlockCallCount).Should(Equal(1))
+
+					network.connect(1)
+					c2.clock.Increment(interval)
+
+					Eventually(doneProp).Should(BeClosed())
+					network.exec(func(c *chain) {
+						Eventually(c.support.WriteBlockCallCount).Should(Equal(2))
+					})
+				})
+			})
+
+			When("follower is disconnected", func() {
+				It("should return error when receiving an env", func() {
+					network.disconnect(2)
+
+					errorC := c2.Errored()
+					Consistently(errorC).ShouldNot(BeClosed()) // assert that errorC is not closed
+
+					By("Ticking node 2 until it becomes pre-candidate")
+					Eventually(func() <-chan raft.SoftState {
+						c2.clock.Increment(interval)
+						return c2.observe
+					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 1, RaftState: raft.StatePreCandidate})))
+
+					Eventually(errorC).Should(BeClosed())
+					err := c2.Order(env, 0)
+					Expect(err).To(HaveOccurred())
+
+					network.connect(2)
+					c1.clock.Increment(interval)
+					Expect(errorC).To(BeClosed())
+
+					Eventually(c2.Errored).ShouldNot(BeClosed())
+				})
+			})
+
 			It("leader retransmits lost messages", func() {
 				// This tests that heartbeats will trigger leader to retransmit lost MsgApp
 
@@ -1862,31 +1958,93 @@ var _ = Describe("Chain", func() {
 					Expect(err).NotTo(HaveOccurred())
 				}
 
-				Eventually(c1.BlockCreator.CreatedBlocks).Should(HaveLen(10))
-			})
-
-			It("calls BlockCreator.commitBlock on all the nodes' chains once a block is written", func() {
-				normalBlock := &common.Block{
-					Header:   &common.BlockHeader{},
-					Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
-					Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
-				}
-				// to test that commitBlock is called on c2(follower) as well; this block should be discarded
-				// after the calling of commitBlock since it is a diverging block
-				c2.BlockCreator.CreatedBlocks <- normalBlock
-
-				c1.cutter.CutNext = true
-				err := c1.Order(env, 0)
-				Expect(err).ToNot(HaveOccurred())
+				network.connect(1)
+				c1.clock.Increment(interval)
 
 				network.exec(
 					func(c *chain) {
-						Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(1))
-						b, _ := c.support.WriteBlockArgsForCall(0)
-						Eventually(c.BlockCreator.CreatedBlocks, LongEventualTimeout).Should(HaveLen(0)) // implies that BlockCreator.commitBlock was called
-						// check that it updates the LastCreatedBlock correctly as well
-						Eventually(bytes.Equal(b.Header.Bytes(), c.BlockCreator.LastCreatedBlock.Header.Bytes()), LongEventualTimeout).Should(BeTrue())
+						Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(10))
 					})
+			})
+
+			It("new leader should wait for in-fight blocks to commit before accepting new env", func() {
+				// Scenario: when a node is elected as new leader and there are still in-flight blocks,
+				// it should not immediately start accepting new envelopes, instead it should wait for
+				// those in-flight blocks to be committed, otherwise we may create uncle block which
+				// forks and panicks chain.
+				//
+				// Steps:
+				// - start raft cluster with three nodes and genesis block0
+				// - order env1 on c1, which creates block1
+				// - drop MsgApp from 1 to 3
+				// - drop second round of MsgApp sent from 1 to 2, so that block1 is only committed on c1
+				// - disconnect c1 and elect c2
+				// - order env2 on c2. This env must NOT be immediately accepted, otherwise c2 would create
+				//   an uncle block1 based on block0.
+				// - c2 commits block1
+				// - c2 accepts env2, and creates block2
+				// - c2 commits block2
+				c1.cutter.CutNext = true
+				c2.cutter.CutNext = true
+
+				step1 := c1.getStepFunc()
+				c1.setStepFunc(func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+					stepMsg := &raftpb.Message{}
+					Expect(proto.Unmarshal(msg.Payload, stepMsg)).NotTo(HaveOccurred())
+
+					if dest == 3 {
+						return nil, nil
+					}
+
+					if stepMsg.Type == raftpb.MsgApp && len(stepMsg.Entries) == 0 {
+						return nil, nil
+					}
+
+					return step1(dest, msg)
+				})
+
+				Expect(c1.Order(env, 0)).NotTo(HaveOccurred())
+
+				Eventually(c1.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+				Consistently(c2.support.WriteBlockCallCount).Should(Equal(0))
+				Consistently(c3.support.WriteBlockCallCount).Should(Equal(0))
+
+				network.disconnect(1)
+
+				step2 := c2.getStepFunc()
+				c2.setStepFunc(func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+					stepMsg := &raftpb.Message{}
+					Expect(proto.Unmarshal(msg.Payload, stepMsg)).NotTo(HaveOccurred())
+
+					if stepMsg.Type == raftpb.MsgApp && len(stepMsg.Entries) != 0 && dest == 3 {
+						for _, ent := range stepMsg.Entries {
+							if len(ent.Data) != 0 {
+								return nil, nil
+							}
+						}
+					}
+					return step2(dest, msg)
+				})
+
+				network.elect(2)
+
+				go func() {
+					Expect(c2.Order(env, 0)).NotTo(HaveOccurred())
+				}()
+
+				Consistently(c2.support.WriteBlockCallCount).Should(Equal(0))
+				Consistently(c3.support.WriteBlockCallCount).Should(Equal(0))
+
+				c2.setStepFunc(step2)
+				c2.clock.Increment(interval)
+
+				Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+				Eventually(c3.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+
+				b, _ := c2.support.WriteBlockArgsForCall(0)
+				Expect(b.Header.Number).To(Equal(uint64(1)))
+				b, _ = c2.support.WriteBlockArgsForCall(1)
+				Expect(b.Header.Number).To(Equal(uint64(2)))
 			})
 
 			Context("handling config blocks", func() {
@@ -1914,22 +2072,38 @@ var _ = Describe("Chain", func() {
 					// config block
 					err := c1.Order(configEnv, 0)
 					Expect(err).NotTo(HaveOccurred())
-					Eventually(c1.BlockCreator.CreatedBlocks).Should(HaveLen(1))
 
 					// to avoid data races since we are accessing these within a goroutine
 					tempEnv := env
 					tempC1 := c1
 
-					// normal blocks
+					done := make(chan struct{})
+
+					// normal block
 					go func() {
 						defer GinkgoRecover()
+
+						// This should be blocked if config block is not committed
 						err := tempC1.Order(tempEnv, 0)
-						// since the chain is stopped after the Consistently test below passes
-						Expect(err).To(MatchError("chain is stopped"))
+						Expect(err).NotTo(HaveOccurred())
+
+						close(done)
 					}()
 
-					// ensure that only one block is created since the config block is never written out
-					Consistently(c1.BlockCreator.CreatedBlocks).Should(HaveLen(1))
+					Consistently(done).ShouldNot(BeClosed())
+
+					network.connect(1)
+					c1.clock.Increment(interval)
+
+					network.exec(
+						func(c *chain) {
+							Eventually(func() int { return c.support.WriteConfigBlockCallCount() }, LongEventualTimeout).Should(Equal(1))
+						})
+
+					network.exec(
+						func(c *chain) {
+							Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(1))
+						})
 				})
 
 				It("continues creating blocks on leader after a config block has been successfully written out", func() {
@@ -2138,13 +2312,6 @@ var _ = Describe("Chain", func() {
 				It("purges blockcutter, stops timer and discards created blocks if leadership is lost", func() {
 					// create one block on chain 1 to test for reset of the created blocks
 					network.disconnect(1)
-					normalBlock := &common.Block{
-						Header:   &common.BlockHeader{},
-						Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
-						Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
-					}
-					c1.BlockCreator.CreatedBlocks <- normalBlock
-					Expect(len(c1.BlockCreator.CreatedBlocks)).To(Equal(1))
 
 					// enqueue one transaction into 1's blockcutter to test for purging of block cutter
 					c1.cutter.CutNext = false
@@ -2162,7 +2329,6 @@ var _ = Describe("Chain", func() {
 					Eventually(c1.clock.WatcherCount, LongEventualTimeout).Should(Equal(1)) // blockcutter time is stopped
 					Eventually(c1.cutter.CurBatch, LongEventualTimeout).Should(HaveLen(0))
 					// the created block should be discarded since there is a leadership change
-					Eventually(c1.BlockCreator.CreatedBlocks).Should(HaveLen(0))
 					Consistently(c1.support.WriteBlockCallCount).Should(Equal(0))
 
 					network.disconnect(2)
@@ -2235,7 +2401,7 @@ var _ = Describe("Chain", func() {
 
 					c2.clock.Increment(interval)
 					// this check guarantees that signal on resignC is consumed in commitBatches method.
-					Eventually(c1.observe, LongEventualTimeout).Should(Receive(Equal(uint64(2))))
+					Eventually(c1.observe, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 2, RaftState: raft.StateFollower})))
 				})
 			})
 		})
@@ -2302,8 +2468,13 @@ func marshalOrPanic(pb proto.Message) []byte {
 }
 
 // helpers to facilitate tests
+type stepFunc func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error)
+
 type chain struct {
 	id uint64
+
+	stepLock sync.RWMutex
+	step     stepFunc
 
 	support      *consensusmocks.FakeConsenterSupport
 	cutter       *mockblockcutter.Receiver
@@ -2319,8 +2490,9 @@ type chain struct {
 	ledgerHeight uint64
 	ledgerLock   sync.RWMutex
 
-	observe   chan uint64
+	observe   chan raft.SoftState
 	unstarted chan struct{}
+	stopped   chan struct{}
 
 	*etcdraft.Chain
 }
@@ -2356,7 +2528,7 @@ func newChain(timeout time.Duration, channel string, dataDir string, id uint64, 
 	// upon leader change, lead is reset to 0 before set to actual
 	// new leader, i.e. 1 -> 0 -> 2. Therefore 2 numbers will be
 	// sent on this chan, so we need size to be 2
-	observe := make(chan uint64, 2)
+	observe := make(chan raft.SoftState, 2)
 
 	configurator := &mocks.Configurator{}
 	configurator.On("Configure", mock.Anything, mock.Anything)
@@ -2376,6 +2548,7 @@ func newChain(timeout time.Duration, channel string, dataDir string, id uint64, 
 		clock:        clock,
 		opts:         opts,
 		unstarted:    ch,
+		stopped:      make(chan struct{}),
 		configurator: configurator,
 		puller:       puller,
 		ledger: map[uint64]*common.Block{
@@ -2425,6 +2598,18 @@ func (c *chain) init() {
 	c.Chain = ch
 }
 
+func (c *chain) setStepFunc(f stepFunc) {
+	c.stepLock.Lock()
+	c.step = f
+	c.stepLock.Unlock()
+}
+
+func (c *chain) getStepFunc() stepFunc {
+	c.stepLock.RLock()
+	defer c.stepLock.RUnlock()
+	return c.step
+}
+
 type network struct {
 	leader uint64
 	chains map[uint64]*chain
@@ -2453,7 +2638,7 @@ func (n *network) addConnection(id uint64) {
 func (n *network) addChain(c *chain) {
 	n.addConnection(c.id)
 
-	c.rpc.StepStub = func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+	c.step = func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
 		n.connLock.RLock()
 		defer n.connLock.RUnlock()
 
@@ -2465,6 +2650,12 @@ func (n *network) addChain(c *chain) {
 		}
 
 		return nil, nil
+	}
+
+	c.rpc.StepStub = func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+		c.stepLock.RLock()
+		defer c.stepLock.RUnlock()
+		return c.step(dest, msg)
 	}
 
 	c.rpc.SendSubmitStub = func(dest uint64, msg *orderer.SubmitRequest) error {
@@ -2564,9 +2755,15 @@ func (n *network) stop(ids ...uint64) {
 		}
 	}
 
-	for _, c := range nodes {
-		n.chains[c].Halt()
-		<-n.chains[c].Errored()
+	for _, id := range nodes {
+		c := n.chains[id]
+		c.Halt()
+		<-c.Errored()
+		select {
+		case <-c.stopped:
+		default:
+			close(c.stopped)
+		}
 	}
 }
 
@@ -2591,7 +2788,7 @@ func (n *network) rejoin(id uint64, wasLeader bool) {
 	n.chains[n.leader].clock.Increment(interval)
 
 	if wasLeader {
-		Eventually(n.chains[id].observe).Should(Receive(Equal(n.leader)))
+		Eventually(n.chains[id].observe).Should(Receive(Equal(raft.SoftState{Lead: n.leader, RaftState: raft.StateFollower})))
 	} else {
 		Consistently(n.chains[id].observe).ShouldNot(Receive())
 	}
@@ -2625,21 +2822,11 @@ func (n *network) elect(id uint64) (tick int) {
 		select {
 		case <-time.After(t):
 			// this tick does not trigger leader change within t, continue
-		case n := <-c.observe: // leadership change occurs
-			if n == 0 {
-				// in etcd/raft, if there's already a leader,
-				// lead in softstate goes through X -> 0 -> Y.
-				// therefore, we might observe 0 first. In this
-				// situation, no more tick is needed because an
-				// leader election is already underway.
-				Eventually(c.observe, LongEventualTimeout).Should(Receive(Equal(id)))
-			} else {
-				// if there's no leader (fresh cluster), we have 0 -> Y
-				// therefore we should observe Y directly.
-				Expect(n).To(Equal(id))
+		case s := <-c.observe: // leadership change occurs
+			if s.RaftState == raft.StateLeader {
+				elected = true
+				break
 			}
-			elected = true
-			break
 		}
 	}
 
@@ -2652,11 +2839,11 @@ func (n *network) elect(id uint64) (tick int) {
 		}
 
 		select {
-		case <-c.Errored(): // skip if node is exit
+		case <-c.stopped: // skip check if node n is stopped
 		case <-n.connectivity[c.id]: // skip check if node n is disconnected
 		case <-c.unstarted: // skip check if node is not started yet
 		default:
-			Eventually(c.observe).Should(Receive(Equal(id)))
+			Eventually(c.observe).Should(Receive(Equal(raft.SoftState{Lead: id, RaftState: raft.StateFollower})))
 		}
 	}
 	n.connLock.RUnlock()

@@ -20,6 +20,11 @@ type chaincodeStub interface {
 	shim.ChaincodeStubInterface
 }
 
+//go:generate counterfeiter -o mock/state_iterator.go --fake-name StateIterator . stateIterator
+type stateIterator interface {
+	shim.StateQueryIteratorInterface
+}
+
 //go:generate counterfeiter -o mock/chaincode_store.go --fake-name ChaincodeStore . chaincodeStore
 type chaincodeStore interface {
 	lifecycle.ChaincodeStore
@@ -33,6 +38,12 @@ type packageParser interface {
 //go:generate counterfeiter -o mock/scc_functions.go --fake-name SCCFunctions . sccFunctions
 type sccFunctions interface {
 	lifecycle.SCCFunctions
+}
+
+//go:generate counterfeiter -o mock/rw_state.go --fake-name ReadWritableState . readWritableState
+type readWritableState interface {
+	lifecycle.ReadWritableState
+	lifecycle.OpaqueState
 }
 
 func TestLifecycle(t *testing.T) {

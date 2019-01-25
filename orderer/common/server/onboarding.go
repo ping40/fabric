@@ -27,12 +27,13 @@ const (
 )
 
 type replicationInitiator struct {
-	channelLister cluster.ChannelLister
-	logger        *flogging.FabricLogger
-	secOpts       *comm.SecureOptions
-	conf          *localconfig.TopLevel
-	lf            cluster.LedgerFactory
-	signer        crypto.LocalSigner
+	verifierRetriever cluster.VerifierRetriever
+	channelLister     cluster.ChannelLister
+	logger            *flogging.FabricLogger
+	secOpts           *comm.SecureOptions
+	conf              *localconfig.TopLevel
+	lf                cluster.LedgerFactory
+	signer            crypto.LocalSigner
 }
 
 func (ri *replicationInitiator) replicateIfNeeded(bootstrapBlock *common.Block) {
@@ -50,7 +51,7 @@ func (ri *replicationInitiator) createReplicator(bootstrapBlock *common.Block, f
 		ri.logger.Panicf("Failed extracting system channel name from bootstrap block: %v", err)
 	}
 	pullerConfig := cluster.PullerConfigFromTopLevelConfig(systemChannelName, ri.conf, ri.secOpts.Key, ri.secOpts.Certificate, ri.signer)
-	puller, err := cluster.BlockPullerFromConfigBlock(pullerConfig, bootstrapBlock)
+	puller, err := cluster.BlockPullerFromConfigBlock(pullerConfig, bootstrapBlock, ri.verifierRetriever)
 	if err != nil {
 		ri.logger.Panicf("Failed creating puller config from bootstrap block: %v", err)
 	}
@@ -117,10 +118,20 @@ func (ri *replicationInitiator) ReplicateChains(lastConfigBlock *common.Block, c
 
 type ledgerFactory struct {
 	blockledger.Factory
+	onBlockCommit cluster.BlockCommitFunc
 }
 
 func (lf *ledgerFactory) GetOrCreate(chainID string) (cluster.LedgerWriter, error) {
-	return lf.Factory.GetOrCreate(chainID)
+	ledger, err := lf.Factory.GetOrCreate(chainID)
+	if err != nil {
+		return nil, err
+	}
+	interceptedLedger := &cluster.LedgerInterceptor{
+		LedgerWriter:         ledger,
+		Channel:              chainID,
+		InterceptBlockCommit: lf.onBlockCommit,
+	}
+	return interceptedLedger, nil
 }
 
 //go:generate mockery -dir . -name ChainReplicator -case underscore -output mocks
@@ -166,7 +177,7 @@ type chainCreation struct {
 
 // TrackChain tracks a chain with the given name, and calls the given callback
 // when this chain should be activated.
-func (dc *inactiveChainReplicator) TrackChain(chain string, genesisBlock *common.Block, createChain etcdraft.CreateChainCallback) {
+func (dc *inactiveChainReplicator) TrackChain(chain string, genesisBlock *common.Block, createChainCallback etcdraft.CreateChainCallback) {
 	if genesisBlock == nil {
 		dc.logger.Panicf("Called with a nil genesis block")
 	}
@@ -175,7 +186,7 @@ func (dc *inactiveChainReplicator) TrackChain(chain string, genesisBlock *common
 	dc.logger.Infof("Adding %s to the set of chains to track", chain)
 	dc.chains2CreationCallbacks[chain] = chainCreation{
 		genesisBlock: genesisBlock,
-		create:       createChain,
+		create:       createChainCallback,
 	}
 }
 
@@ -221,4 +232,81 @@ func (dc *inactiveChainReplicator) listInactiveChains() []string {
 		chains = append(chains, chain)
 	}
 	return chains
+}
+
+//go:generate mockery -dir . -name Factory -case underscore  -output mocks/
+
+// Factory retrieves or creates new ledgers by chainID
+type Factory interface {
+	// GetOrCreate gets an existing ledger (if it exists)
+	// or creates it if it does not
+	GetOrCreate(chainID string) (blockledger.ReadWriter, error)
+
+	// ChainIDs returns the chain IDs the Factory is aware of
+	ChainIDs() []string
+
+	// Close releases all resources acquired by the factory
+	Close()
+}
+
+type blockGetter struct {
+	ledger blockledger.Reader
+}
+
+func (bg *blockGetter) Block(number uint64) *common.Block {
+	return blockledger.GetBlock(bg.ledger, number)
+}
+
+type verifierLoader struct {
+	ledgerFactory   blockledger.Factory
+	verifierFactory cluster.VerifierFactory
+	logger          *flogging.FabricLogger
+	onFailure       func(block *common.Block)
+}
+
+type verifiersByChannel map[string]cluster.BlockVerifier
+
+func (vl *verifierLoader) loadVerifiers() verifiersByChannel {
+	res := make(verifiersByChannel)
+
+	for _, chain := range vl.ledgerFactory.ChainIDs() {
+		ledger, err := vl.ledgerFactory.GetOrCreate(chain)
+		if err != nil {
+			vl.logger.Panicf("Failed obtaining ledger for channel %s", chain)
+			return nil
+		}
+
+		blockRetriever := &blockGetter{ledger: ledger}
+		height := ledger.Height()
+		if height == 0 {
+			vl.logger.Infof("Channel %s has no blocks, skipping it", chain)
+			continue
+		}
+		lastBlockIndex := height - 1
+		lastBlock := blockRetriever.Block(lastBlockIndex)
+		if lastBlock == nil {
+			vl.logger.Panicf("Failed retrieving block %d for channel %s", lastBlockIndex, chain)
+		}
+
+		lastConfigBlock, err := cluster.LastConfigBlock(lastBlock, blockRetriever)
+		if err != nil {
+			vl.logger.Panicf("Failed retrieving config block %d for channel %s", lastBlockIndex, chain)
+		}
+		conf, err := cluster.ConfigFromBlock(lastConfigBlock)
+		if err != nil {
+			vl.onFailure(lastConfigBlock)
+			vl.logger.Panicf("Failed extracting configuration for channel %s from block %d: %v",
+				chain, lastConfigBlock.Header.Number, err)
+		}
+
+		verifier, err := vl.verifierFactory.VerifierFromConfig(conf, chain)
+		if err != nil {
+			vl.onFailure(lastConfigBlock)
+			vl.logger.Panicf("Failed creating verifier for channel %s from block %d: %v", chain, lastBlockIndex, err)
+		}
+		vl.logger.Infof("Loaded verifier for channel %s from config block at index %d", chain, lastBlockIndex)
+		res[chain] = verifier
+	}
+
+	return res
 }
