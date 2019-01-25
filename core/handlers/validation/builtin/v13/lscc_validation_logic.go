@@ -89,7 +89,7 @@ func validateNewCollectionConfigs(newCollectionConfigs []*common.CollectionConfi
 
 		}
 
-		// make sure that the signature policy is meaningful (only consists of ORs)
+		// make sure that the signature policy is meaningful (only consists of ORs) 为什么？
 		err := validateSpOrConcat(newCollection.MemberOrgsPolicy.GetSignaturePolicy().Rule)
 		if err != nil {
 			return errors.WithMessage(err, fmt.Sprintf("collection-name: %s -- error in member org policy", collectionName))

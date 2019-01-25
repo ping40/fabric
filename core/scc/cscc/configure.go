@@ -34,6 +34,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+
 // New creates a new instance of the CSCC.
 // Typically, only one will be created per peer instance.
 func New(ccp ccprovider.ChaincodeProvider, sccp sysccprovider.SystemChaincodeProvider,

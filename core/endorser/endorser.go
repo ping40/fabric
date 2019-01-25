@@ -205,7 +205,7 @@ func (e *Endorser) SanitizeUserCDS(userCDS *pb.ChaincodeDeploymentSpec) (*pb.Cha
 		return nil, errors.Wrapf(err, "cannot deploy a chaincode which is not installed")
 	}
 
-	sanitizedCDS := proto.Clone(fsCDS).(*pb.ChaincodeDeploymentSpec)
+	sanitizedCDS := proto.Clone(fsCDS).(*pb.ChaincodeDeploymentSpec)//好方法
 	sanitizedCDS.CodePackage = nil
 	sanitizedCDS.ChaincodeSpec.Input = userCDS.ChaincodeSpec.Input
 
@@ -496,7 +496,7 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 
 	// TODO: if the proposal has an extension, it will be of type ChaincodeAction;
 	//       if it's present it means that no simulation is to be performed because
-	//       we're trying to emulate a submitting peer. On the other hand, we need
+	//       we're trying to emulate a submitting peer 什么意思？. On the other hand, we need
 	//       to validate the supplied action before endorsing it
 
 	// 1 -- simulate

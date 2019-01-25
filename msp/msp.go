@@ -190,7 +190,7 @@ type IdentityIdentifier struct {
 	Mspid string
 
 	// The identifier for an identity within a provider
-	Id string
+	Id string //64位，是certificate's Certificate 的hash值
 }
 
 // ProviderType indicates the type of an identity provider

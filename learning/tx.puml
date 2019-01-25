@@ -9,4 +9,37 @@ class TransactionAction  {
 }
 
 Transaction *-- TransactionAction
+
+class ChaincodeActionPayload {
+    ChaincodeProposalPayload []byte
+    Actions *ChaincodeEndorsedAction
+}
+
+TransactionAction *-- ChaincodeActionPayload
+
+class ChaincodeEndorsedAction {
+    ProposalResponsePayload []byte
+    Endorsements         []*Endorsement
+}
+
+ChaincodeActionPayload <--ChaincodeEndorsedAction
+
+class ProposalResponsePayload {
+   ProposalHash []byte
+   Extension []byte
+}
+ChaincodeEndorsedAction <--ProposalResponsePayload
+
+
+class ChaincodeAction {
+	Results []byte
+	Events []byte
+	Response *Response
+	ChaincodeId *ChaincodeID
+	TokenExpectation     *token.TokenExpectation
+}
+ProposalResponsePayload <--ChaincodeAction : extension
+
+note top of ChaincodeAction : Result 就是 rwset
+
 @enduml

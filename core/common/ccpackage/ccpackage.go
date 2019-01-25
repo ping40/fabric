@@ -153,11 +153,7 @@ func CreateSignedCCDepSpecForInstall(pack []*common.Envelope) (*common.Envelope,
 			baseCip = cip
 			//if it has endorsement, all other owners should have signed too
 			if len(cip.OwnerEndorsements) > 0 {
-<<<<<<< HEAD
-				endorsementExists = true // added by ping40
-=======
 				endorsementExists = true
->>>>>>> upstream/master
 				endorsements = make([]*peer.Endorsement, len(pack))
 			}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/hyperledger/fabric/protos/ledger/rwset"
 )
 
+
 // State defines interaction with the world state
 type State interface {
 	// GetPrivateDataMultipleKeys gets the values for the multiple private data items in a single call

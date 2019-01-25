@@ -204,7 +204,7 @@ var validationWorkersSemaphore semaphore.Semaphore
 
 // Initialize sets up any chains that the peer has from the persistence. This
 // function should be called at the start up when the ledger and gossip
-// ready
+// ready 业务开始点
 func Initialize(init func(string), ccp ccprovider.ChaincodeProvider, sccp sysccprovider.SystemChaincodeProvider,
 	pm plugin.Mapper, pr *platforms.Registry, deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
 	membershipProvider ledger.MembershipInfoProvider, metricsProvider metrics.Provider) {

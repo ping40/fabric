@@ -48,6 +48,11 @@ type MapBasedPluginMapper map[string]endorsement.PluginFactory
 
 // PluginFactoryByName returns a plugin factory for the given plugin name, or nil if not found
 func (m MapBasedPluginMapper) PluginFactoryByName(name PluginName) endorsement.PluginFactory {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	endorserLogger.Errorf("ex plugin_indorser.go, keys: %+v", keys) // 结果 是 escc
 	return m[string(name)]
 }
 
@@ -198,7 +203,7 @@ func (pe *PluginEndorser) EndorseWithPlugin(ctx Context) (*pb.ProposalResponse, 
 	return resp, nil
 }
 
-// getAndStorePlugin returns a plugin instance for the given plugin name and channel
+// getAndStorePlugin returns a plugin instance for the given plugin name and channel pingmodify
 func (pe *PluginEndorser) getOrCreatePlugin(plugin PluginName, channel string) (endorsement.Plugin, error) {
 	pluginFactory := pe.PluginFactoryByName(plugin)
 	if pluginFactory == nil {
