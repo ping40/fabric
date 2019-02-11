@@ -8,9 +8,9 @@ package cluster_test
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +22,7 @@ import (
 	comm_utils "github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/cluster/mocks"
+	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/orderer"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
@@ -48,29 +49,40 @@ var (
 		Channel: "test",
 	}
 
-	testStepReq = &orderer.StepRequest{
+	testReq = &orderer.SubmitRequest{
 		Channel: "test",
-		Payload: []byte("test"),
+		Payload: &common.Envelope{
+			Payload: []byte("test"),
+		},
 	}
 
-	testStepRes = &orderer.StepResponse{
-		Payload: []byte("test"),
+	testRes = &orderer.SubmitResponse{
+		Info: "test",
 	}
 
-	fooReq = &orderer.StepRequest{
+	fooReq = wrapSubmitReq(&orderer.SubmitRequest{
 		Channel: "foo",
+	})
+
+	fooRes = &orderer.SubmitResponse{
+		Info: "foo",
 	}
 
-	fooRes = &orderer.StepResponse{
-		Payload: []byte("foo"),
-	}
-
-	barReq = &orderer.StepRequest{
+	barReq = wrapSubmitReq(&orderer.SubmitRequest{
 		Channel: "bar",
+	})
+
+	barRes = &orderer.SubmitResponse{
+		Info: "bar",
 	}
 
-	barRes = &orderer.StepResponse{
-		Payload: []byte("bar"),
+	testConsensusReq = &orderer.StepRequest{
+		Payload: &orderer.StepRequest_ConsensusRequest{
+			ConsensusRequest: &orderer.ConsensusRequest{
+				Payload: []byte{1, 2, 3},
+				Channel: testChannel,
+			},
+		},
 	}
 
 	channelExtractor = &mockChannelExtractor{}
@@ -91,16 +103,18 @@ func createCAOrPanic() tlsgen.CA {
 type mockChannelExtractor struct{}
 
 func (*mockChannelExtractor) TargetChannel(msg proto.Message) string {
-	if stepReq, isStepReq := msg.(*orderer.StepRequest); isStepReq {
-		return stepReq.Channel
+	switch req := msg.(type) {
+	case *orderer.ConsensusRequest:
+		return req.Channel
+	case *orderer.SubmitRequest:
+		return req.Channel
+	default:
+		return ""
 	}
-	if subReq, isSubReq := msg.(*orderer.SubmitRequest); isSubReq {
-		return string(subReq.Channel)
-	}
-	return ""
 }
 
 type clusterNode struct {
+	freezeWG     sync.WaitGroup
 	dialer       *cluster.PredicateDialer
 	handler      *mocks.Handler
 	nodeInfo     cluster.RemoteNode
@@ -111,20 +125,27 @@ type clusterNode struct {
 	c            *cluster.Comm
 }
 
-func (cn *clusterNode) Submit(stream orderer.Cluster_SubmitServer) error {
+func (cn *clusterNode) Step(stream orderer.Cluster_StepServer) error {
+	cn.freezeWG.Wait()
 	req, err := stream.Recv()
 	if err != nil {
 		return err
 	}
-	res, err := cn.c.DispatchSubmit(stream.Context(), req)
-	if err != nil {
+	if submitReq := req.GetSubmitRequest(); submitReq != nil {
+		return cn.c.DispatchSubmit(stream.Context(), submitReq)
+	}
+	if err := cn.c.DispatchConsensus(stream.Context(), req.GetConsensusRequest()); err != nil {
 		return err
 	}
-	return stream.Send(res)
+	return stream.Send(&orderer.StepResponse{})
 }
 
-func (cn *clusterNode) Step(ctx context.Context, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
-	return cn.c.DispatchStep(ctx, msg)
+func (cn *clusterNode) freeze() {
+	cn.freezeWG.Add(1)
+}
+
+func (cn *clusterNode) unfreeze() {
+	cn.freezeWG.Done()
 }
 
 func (cn *clusterNode) resurrect() {
@@ -211,16 +232,206 @@ func newTestNode(t *testing.T) *clusterNode {
 	}
 
 	tstSrv.c = &cluster.Comm{
-		Logger:       flogging.MustGetLogger("test"),
-		Chan2Members: make(cluster.MembersByChannel),
-		H:            handler,
-		ChanExt:      channelExtractor,
-		Connections:  cluster.NewConnectionStore(dialer),
+		SendBufferSize: 1,
+		Logger:         flogging.MustGetLogger("test"),
+		Chan2Members:   make(cluster.MembersByChannel),
+		H:              handler,
+		ChanExt:        channelExtractor,
+		Connections:    cluster.NewConnectionStore(dialer),
 	}
 
 	orderer.RegisterClusterServer(gRPCServer.Server(), tstSrv)
 	go gRPCServer.Start()
 	return tstSrv
+}
+
+func TestSendBigMessage(t *testing.T) {
+	t.Parallel()
+
+	// Scenario: Basic test that spawns 5 nodes and sends a big message
+	// from one of the nodes to the others.
+	// A receiver node's Step() server side method (which calls Recv)
+	// is frozen until the sender's node Send method returns,
+	// Hence - the sender node finishes calling Send
+	// before a receiver node starts calling Recv.
+	// This ensures that Send is non blocking even with big messages.
+	// In the test, we send a total of 8MB of random data (2MB to each node).
+	// The randomness is used so gRPC compression won't compress it to a lower size.
+
+	node1 := newTestNode(t)
+	node2 := newTestNode(t)
+	node3 := newTestNode(t)
+	node4 := newTestNode(t)
+	node5 := newTestNode(t)
+
+	for _, node := range []*clusterNode{node2, node3, node4, node5} {
+		node.c.SendBufferSize = 1
+	}
+
+	defer node1.stop()
+	defer node2.stop()
+	defer node3.stop()
+	defer node4.stop()
+	defer node5.stop()
+
+	config := []cluster.RemoteNode{node1.nodeInfo, node2.nodeInfo, node3.nodeInfo, node4.nodeInfo, node5.nodeInfo}
+	node1.c.Configure(testChannel, config)
+	node2.c.Configure(testChannel, config)
+	node3.c.Configure(testChannel, config)
+	node4.c.Configure(testChannel, config)
+	node5.c.Configure(testChannel, config)
+
+	var messageReceived sync.WaitGroup
+	messageReceived.Add(4)
+
+	msgSize := 1024 * 1024 * 2
+	bigMsg := &orderer.ConsensusRequest{
+		Channel: testChannel,
+		Payload: make([]byte, msgSize),
+	}
+
+	_, err := rand.Read(bigMsg.Payload)
+	assert.NoError(t, err)
+
+	wrappedMsg := &orderer.StepRequest{
+		Payload: &orderer.StepRequest_ConsensusRequest{
+			ConsensusRequest: bigMsg,
+		},
+	}
+
+	for _, node := range []*clusterNode{node2, node3, node4, node5} {
+		node.handler.On("OnConsensus", testChannel, node1.nodeInfo.ID, mock.Anything).Run(func(args mock.Arguments) {
+			msg := args.Get(2).(*orderer.ConsensusRequest)
+			assert.Len(t, msg.Payload, msgSize)
+			messageReceived.Done()
+		}).Return(nil)
+	}
+
+	streams := map[uint64]*cluster.Stream{}
+
+	for _, node := range []*clusterNode{node2, node3, node4, node5} {
+		rm, err := node1.c.Remote(testChannel, node.nodeInfo.ID)
+		assert.NoError(t, err)
+
+		stream := assertEventualEstablishStream(t, rm)
+		streams[node.nodeInfo.ID] = stream
+	}
+
+	t0 := time.Now()
+	for _, node := range []*clusterNode{node2, node3, node4, node5} {
+		stream := streams[node.nodeInfo.ID]
+		// Freeze the node, in order to block its Recv
+		node.freeze()
+
+		t1 := time.Now()
+		err = stream.Send(wrappedMsg)
+		assert.NoError(t, err)
+		t.Log("Sending took", time.Since(t1))
+		t1 = time.Now()
+
+		// Unfreeze the node. It can now call Recv, and signal the messageReceived waitGroup.
+		node.unfreeze()
+	}
+
+	t.Log("Total sending time to all 4 nodes took:", time.Since(t0))
+
+	messageReceived.Wait()
+}
+
+func TestBlockingSend(t *testing.T) {
+	t.Parallel()
+	// Scenario: Basic test that spawns 2 nodes and sends from the first node
+	// to the second node, three SubmitRequests, or three consensus requests.
+	// SubmitRequests should block, but consensus requests should not.
+
+	for _, testCase := range []struct {
+		description        string
+		messageToSend      *orderer.StepRequest
+		streamUnblocks     bool
+		elapsedGreaterThan time.Duration
+		overflowErr        string
+	}{
+		{
+			description:        "SubmitRequest",
+			messageToSend:      wrapSubmitReq(testReq),
+			streamUnblocks:     true,
+			elapsedGreaterThan: time.Second / 2,
+		},
+		{
+			description:   "ConsensusRequest",
+			messageToSend: testConsensusReq,
+			overflowErr:   "send queue overflown",
+		},
+	} {
+		t.Run(testCase.description, func(t *testing.T) {
+			node1 := newTestNode(t)
+			node2 := newTestNode(t)
+
+			node1.c.SendBufferSize = 1
+			node2.c.SendBufferSize = 1
+
+			defer node1.stop()
+			defer node2.stop()
+
+			config := []cluster.RemoteNode{node1.nodeInfo, node2.nodeInfo}
+			node1.c.Configure(testChannel, config)
+			node2.c.Configure(testChannel, config)
+
+			rm, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
+			assert.NoError(t, err)
+
+			client := &mocks.ClusterClient{}
+			fakeStream := &mocks.StepClient{}
+
+			// Replace real client with a mock client
+			rm.Client = client
+			rm.ProbeConn = func(_ *grpc.ClientConn) error {
+				return nil
+			}
+			// Configure client to return the mock stream
+			fakeStream.On("Context", mock.Anything).Return(context.Background())
+			client.On("Step", mock.Anything).Return(fakeStream, nil).Once()
+
+			var unBlock sync.WaitGroup
+			unBlock.Add(1)
+			fakeStream.On("Send", mock.Anything).Run(func(_ mock.Arguments) {
+				unBlock.Wait()
+			}).Return(errors.New("oops"))
+
+			stream, err := rm.NewStream(time.Hour)
+			assert.NoError(t, err)
+
+			// The first send doesn't block, even though the Send operation blocks.
+			err = stream.Send(testCase.messageToSend)
+			assert.NoError(t, err)
+
+			// The second once doesn't either.
+			// At this point, we have 1 goroutine which is blocked on Send(),
+			// and one message in the buffer.
+			err = stream.Send(testCase.messageToSend)
+			if testCase.overflowErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.EqualError(t, err, testCase.overflowErr)
+			}
+
+			// The third blocks, so we need to unblock it ourselves
+			// in order for it to go through, unless the operation
+			// is non blocking.
+			go func() {
+				time.Sleep(time.Second)
+				if testCase.streamUnblocks {
+					unBlock.Done()
+				}
+			}()
+
+			t1 := time.Now()
+			stream.Send(testCase.messageToSend)
+			elapsed := time.Since(t1)
+			t.Log("Elapsed time:", elapsed)
+			assert.True(t, elapsed > testCase.elapsedGreaterThan)
+		})
+	}
 }
 
 func TestBasic(t *testing.T) {
@@ -234,14 +445,11 @@ func TestBasic(t *testing.T) {
 	defer node1.stop()
 	defer node2.stop()
 
-	node1.handler.On("OnStep", testChannel, node2.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
-	node2.handler.On("OnStep", testChannel, node1.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
-
 	config := []cluster.RemoteNode{node1.nodeInfo, node2.nodeInfo}
 	node1.c.Configure(testChannel, config)
 	node2.c.Configure(testChannel, config)
 
-	assertBiDiCommunication(t, node1, node2, testStepReq)
+	assertBiDiCommunication(t, node1, node2, testReq)
 }
 
 func TestUnavailableHosts(t *testing.T) {
@@ -249,6 +457,7 @@ func TestUnavailableHosts(t *testing.T) {
 	// Scenario: A node is configured to connect
 	// to a host that is down
 	node1 := newTestNode(t)
+
 	clientConfig, err := node1.dialer.ClientConfig()
 	assert.NoError(t, err)
 	// The below timeout makes sure that connection establishment is done
@@ -265,7 +474,8 @@ func TestUnavailableHosts(t *testing.T) {
 	remote, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
 	assert.NoError(t, err)
 	assert.NotNil(t, remote)
-	_, err = remote.Step(&orderer.StepRequest{})
+
+	_, err = remote.NewStream(time.Millisecond * 100)
 	assert.Contains(t, err.Error(), "connection")
 }
 
@@ -332,7 +542,7 @@ func testStreamAbort(t *testing.T, node2 *clusterNode, newMembership []cluster.R
 		// Wait for reconfiguration to take place before returning, so that
 		// the Recv() would happen after reconfiguration
 		waitForReconfigWG.Wait()
-	}).Return(nil, nil).Once()
+	}).Return(nil).Once()
 
 	rm1, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
 	assert.NoError(t, err)
@@ -340,12 +550,9 @@ func testStreamAbort(t *testing.T, node2 *clusterNode, newMembership []cluster.R
 	errorChan := make(chan error)
 
 	go func() {
-		stream, err := rm1.SubmitStream()
-		assert.NoError(t, err)
+		stream := assertEventualEstablishStream(t, rm1)
 		// Signal the reconfiguration
-		err = stream.Send(&orderer.SubmitRequest{
-			Channel: testChannel,
-		})
+		err = stream.Send(wrapSubmitReq(testReq))
 		assert.NoError(t, err)
 		_, err = stream.Recv()
 		assert.Contains(t, err.Error(), expectedError)
@@ -417,14 +624,17 @@ func TestInvalidChannel(t *testing.T) {
 		stub, err := node1.c.Remote(testChannel, node1.nodeInfo.ID)
 		assert.NoError(t, err)
 
-		// An empty StepRequest has an empty channel which is invalid
-		gt.Eventually(func() string {
-			_, err = stub.Step(&orderer.StepRequest{})
-			return err.Error()
-		}, timeout).Should(gomega.ContainSubstring("badly formatted message, cannot extract channel"))
+		stream := assertEventualEstablishStream(t, stub)
 
-		// An empty SubmitRequest has an empty channel which is invalid.
-		_, err = node1.c.DispatchSubmit(context.Background(), &orderer.SubmitRequest{})
+		// An empty SubmitRequest has an empty channel which is invalid
+		err = stream.Send(wrapSubmitReq(&orderer.SubmitRequest{}))
+		assert.NoError(t, err)
+
+		_, err = stream.Recv()
+		assert.EqualError(t, err, "rpc error: code = Unknown desc = badly formatted message, cannot extract channel")
+
+		// Test directly without going through the gRPC stream
+		err = node1.c.DispatchSubmit(context.Background(), &orderer.SubmitRequest{})
 		assert.EqualError(t, err, "badly formatted message, cannot extract channel")
 	})
 }
@@ -438,35 +648,37 @@ func TestAbortRPC(t *testing.T) {
 	// and the RPC invocation returns prematurely.
 
 	testCases := []struct {
-		name       string
-		abortFunc  func(*cluster.RemoteContext)
-		rpcTimeout time.Duration
+		name        string
+		abortFunc   func(*cluster.RemoteContext)
+		rpcTimeout  time.Duration
+		expectedErr string
 	}{
 		{
-			name:       "Abort() called",
-			rpcTimeout: 0,
+			name:        "Abort() called",
+			expectedErr: "rpc error: code = Canceled desc = context canceled",
+			rpcTimeout:  time.Hour,
 			abortFunc: func(rc *cluster.RemoteContext) {
 				rc.Abort()
 			},
 		},
 		{
-			name:       "RPC timeout",
-			rpcTimeout: time.Second,
-			abortFunc:  func(*cluster.RemoteContext) {},
+			name:        "RPC timeout",
+			expectedErr: "rpc timeout expired",
+			rpcTimeout:  time.Second,
+			abortFunc:   func(*cluster.RemoteContext) {},
 		},
 	}
 
 	for _, testCase := range testCases {
 		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
-			testAbort(t, testCase.abortFunc, testCase.rpcTimeout)
+			testAbort(t, testCase.abortFunc, testCase.rpcTimeout, testCase.expectedErr)
 		})
 	}
 }
 
-func testAbort(t *testing.T, abortFunc func(*cluster.RemoteContext), rpcTimeout time.Duration) {
+func testAbort(t *testing.T, abortFunc func(*cluster.RemoteContext), rpcTimeout time.Duration, expectedErr string) {
 	node1 := newTestNode(t)
-	node1.c.RPCTimeout = rpcTimeout
 	defer node1.stop()
 
 	node2 := newTestNode(t)
@@ -484,7 +696,7 @@ func testAbort(t *testing.T, abortFunc func(*cluster.RemoteContext), rpcTimeout 
 	// At the end of the test, release the server-side resources
 	defer stuckCall.Done()
 
-	node2.handler.On("OnStep", testChannel, node1.nodeInfo.ID, mock.Anything).Return(testStepRes, nil).Once().Run(func(_ mock.Arguments) {
+	node2.handler.On("OnSubmit", testChannel, node1.nodeInfo.ID, mock.Anything).Return(nil).Once().Run(func(_ mock.Arguments) {
 		onStepCalled.Done()
 		stuckCall.Wait()
 	}).Once()
@@ -497,15 +709,19 @@ func testAbort(t *testing.T, abortFunc func(*cluster.RemoteContext), rpcTimeout 
 		abortFunc(rm)
 	}()
 
+	var stream *cluster.Stream
 	gt := gomega.NewGomegaWithT(t)
 	gt.Eventually(func() error {
-		_, err := rm.Step(testStepReq)
-		if err != nil && strings.Contains(err.Error(), "is in state") {
-			return err
-		}
-		return nil
-	}, timeout).Should(gomega.Succeed())
-	node2.handler.AssertNumberOfCalls(t, "OnStep", 1)
+		stream, err = rm.NewStream(rpcTimeout)
+		return err
+	}, time.Second*10, time.Millisecond*10).Should(gomega.Succeed())
+
+	stream.Send(wrapSubmitReq(testSubReq))
+	_, err = stream.Recv()
+
+	assert.EqualError(t, err, expectedErr)
+
+	node2.handler.AssertNumberOfCalls(t, "OnSubmit", 1)
 }
 
 func TestNoTLSCertificate(t *testing.T) {
@@ -536,12 +752,16 @@ func TestNoTLSCertificate(t *testing.T) {
 	}, time.Minute).Should(gomega.BeTrue())
 
 	echoClient := orderer.NewClusterClient(conn)
-	_, err = echoClient.Step(context.Background(), testStepReq)
+	stream, err := echoClient.Step(context.Background())
+	assert.NoError(t, err)
+
+	err = stream.Send(wrapSubmitReq(testSubReq))
+	assert.NoError(t, err)
+	_, err = stream.Recv()
 	assert.EqualError(t, err, "rpc error: code = Unknown desc = no TLS certificate sent")
 }
 
 func TestReconnect(t *testing.T) {
-	t.Skip()
 	t.Parallel()
 	// Scenario: node 1 and node 2 are connected,
 	// and node 2 is taken offline.
@@ -558,7 +778,7 @@ func TestReconnect(t *testing.T) {
 	node1.dialer.SetConfig(conf)
 
 	node2 := newTestNode(t)
-	node2.handler.On("OnStep", testChannel, node1.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
+	node2.handler.On("OnSubmit", testChannel, node1.nodeInfo.ID, mock.Anything).Return(nil)
 	defer node2.stop()
 
 	config := []cluster.RemoteNode{node1.nodeInfo, node2.nodeInfo}
@@ -569,17 +789,16 @@ func TestReconnect(t *testing.T) {
 	node2.srv.Stop()
 	// Obtain the stub for node 2.
 	// Should succeed, because the connection was created at time of configuration
-	gt := gomega.NewGomegaWithT(t)
-	gt.Eventually(func() (bool, error) {
-		_, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
-		return true, err
-	}, time.Minute).Should(gomega.BeTrue())
 	stub, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
 	assert.NoError(t, err)
-	// Send a message from node 1 to node 2.
-	// Should fail.
-	_, err = stub.Step(testStepReq)
-	assert.Contains(t, err.Error(), node2.nodeInfo.Endpoint)
+
+	// Try to obtain a stream. Should not Succeed.
+	gt := gomega.NewGomegaWithT(t)
+	gt.Eventually(func() error {
+		_, err = stub.NewStream(time.Hour)
+		return err
+	}).Should(gomega.Not(gomega.Succeed()))
+
 	// Wait for the port to be released
 	for {
 		lsnr, err := net.Listen("tcp", node2.nodeInfo.Endpoint)
@@ -593,7 +812,7 @@ func TestReconnect(t *testing.T) {
 	node2.resurrect()
 	// Send a message from node 1 to node 2.
 	// Should succeed eventually
-	assertEventuallyConnect(t, stub, testStepReq)
+	assertEventualSendMessage(t, stub, testReq)
 }
 
 func TestRenewCertificates(t *testing.T) {
@@ -610,14 +829,14 @@ func TestRenewCertificates(t *testing.T) {
 	node2 := newTestNode(t)
 	defer node2.stop()
 
-	node1.handler.On("OnStep", testChannel, node2.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
-	node2.handler.On("OnStep", testChannel, node1.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
+	node1.handler.On("OnStep", testChannel, node2.nodeInfo.ID, mock.Anything).Return(testRes, nil)
+	node2.handler.On("OnStep", testChannel, node1.nodeInfo.ID, mock.Anything).Return(testRes, nil)
 
 	config := []cluster.RemoteNode{node1.nodeInfo, node2.nodeInfo}
 	node1.c.Configure(testChannel, config)
 	node2.c.Configure(testChannel, config)
 
-	assertBiDiCommunication(t, node1, node2, testStepReq)
+	assertBiDiCommunication(t, node1, node2, testReq)
 
 	// Now, renew certificates both both nodes
 	node1.renewCertificates()
@@ -638,7 +857,7 @@ func TestRenewCertificates(t *testing.T) {
 
 	gt := gomega.NewGomegaWithT(t)
 	gt.Eventually(func() string {
-		_, err = remote.Step(&orderer.StepRequest{})
+		_, err = remote.NewStream(time.Hour)
 		return err.Error()
 	}, timeout).Should(gomega.ContainSubstring(info2.Endpoint))
 
@@ -649,7 +868,7 @@ func TestRenewCertificates(t *testing.T) {
 	node2.resurrect()
 
 	// Finally, check that the nodes can communicate once again
-	assertBiDiCommunication(t, node1, node2, testStepReq)
+	assertBiDiCommunication(t, node1, node2, testReq)
 }
 
 func TestMembershipReconfiguration(t *testing.T) {
@@ -682,28 +901,29 @@ func TestMembershipReconfiguration(t *testing.T) {
 
 	stub, err := node2.c.Remote(testChannel, node1.nodeInfo.ID)
 
-	probe := func() string {
-		_, err = stub.Step(testStepReq)
-		return err.Error()
-	}
+	stream := assertEventualEstablishStream(t, stub)
+	err = stream.Send(wrapSubmitReq(testSubReq))
+	assert.NoError(t, err)
 
-	gt.Eventually(probe, timeout).Should(gomega.ContainSubstring("certificate extracted from TLS connection isn't authorized"))
+	_, err = stream.Recv()
+	assert.EqualError(t, err, "rpc error: code = Unknown desc = certificate extracted from TLS connection isn't authorized")
 
 	// Next, configure node 1 to know about node 2
-	node1.handler.On("OnStep", testChannel, node2.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
-	node2.handler.On("OnStep", testChannel, node1.nodeInfo.ID, mock.Anything).Return(testStepRes, nil)
 	node1.c.Configure(testChannel, []cluster.RemoteNode{node2.nodeInfo})
 
 	// Check that the communication works correctly between both nodes
-	assertBiDiCommunication(t, node1, node2, testStepReq)
-	assertBiDiCommunication(t, node2, node1, testStepReq)
+	assertBiDiCommunication(t, node1, node2, testReq)
+	assertBiDiCommunication(t, node2, node1, testReq)
 
 	// Reconfigure node 2 to forget about node 1
 	node2.c.Configure(testChannel, []cluster.RemoteNode{})
 	// Node 1 can still connect to node 2
 	stub, err = node1.c.Remote(testChannel, node2.nodeInfo.ID)
+	assert.NoError(t, err)
 	// But can't send a message because node 2 now doesn't authorized node 1
-	_, err = stub.Step(testStepReq)
+	stream = assertEventualEstablishStream(t, stub)
+	stream.Send(wrapSubmitReq(testSubReq))
+	_, err = stream.Recv()
 	assert.EqualError(t, err, "rpc error: code = Unknown desc = certificate extracted from TLS connection isn't authorized")
 }
 
@@ -738,7 +958,14 @@ func TestShutdown(t *testing.T) {
 
 	// Therefore, sending a message doesn't succeed because node 1 rejected the configuration change
 	gt.Eventually(func() string {
-		_, err := stub.Step(testStepReq)
+		stream, err := stub.NewStream(time.Hour)
+		if err != nil {
+			return err.Error()
+		}
+		err = stream.Send(wrapSubmitReq(testSubReq))
+		assert.NoError(t, err)
+
+		_, err = stream.Recv()
 		return err.Error()
 	}, timeout).Should(gomega.ContainSubstring("channel test doesn't exist"))
 }
@@ -766,35 +993,57 @@ func TestMultiChannelConfig(t *testing.T) {
 	node3.c.Configure("bar", []cluster.RemoteNode{node1.nodeInfo})
 
 	t.Run("Correct channel", func(t *testing.T) {
-		node1.handler.On("OnStep", "foo", node2.nodeInfo.ID, mock.Anything).Return(fooRes, nil)
-		node1.handler.On("OnStep", "bar", node3.nodeInfo.ID, mock.Anything).Return(barRes, nil)
+		var fromNode2 sync.WaitGroup
+		fromNode2.Add(1)
+		node1.handler.On("OnSubmit", "foo", node2.nodeInfo.ID, mock.Anything).Return(nil).Run(func(_ mock.Arguments) {
+			fromNode2.Done()
+		}).Once()
+
+		var fromNode3 sync.WaitGroup
+		fromNode3.Add(1)
+		node1.handler.On("OnSubmit", "bar", node3.nodeInfo.ID, mock.Anything).Return(nil).Run(func(_ mock.Arguments) {
+			fromNode3.Done()
+		}).Once()
 
 		node2toNode1, err := node2.c.Remote("foo", node1.nodeInfo.ID)
 		assert.NoError(t, err)
 		node3toNode1, err := node3.c.Remote("bar", node1.nodeInfo.ID)
 		assert.NoError(t, err)
 
-		assertEventuallyConnect(t, node2toNode1, fooReq)
-		res, err := node2toNode1.Step(fooReq)
-		assert.NoError(t, err)
-		assert.Equal(t, string(res.Payload), fooReq.Channel)
+		stream := assertEventualEstablishStream(t, node2toNode1)
+		stream.Send(fooReq)
 
-		assertEventuallyConnect(t, node3toNode1, barReq)
-		res, err = node3toNode1.Step(barReq)
-		assert.NoError(t, err)
-		assert.Equal(t, string(res.Payload), barReq.Channel)
+		fromNode2.Wait()
+		node1.handler.AssertNumberOfCalls(t, "OnSubmit", 1)
+
+		stream = assertEventualEstablishStream(t, node3toNode1)
+		stream.Send(barReq)
+
+		fromNode3.Wait()
+		node1.handler.AssertNumberOfCalls(t, "OnSubmit", 2)
 	})
 
 	t.Run("Incorrect channel", func(t *testing.T) {
+		node1.handler.On("OnSubmit", "foo", node2.nodeInfo.ID, mock.Anything).Return(nil)
+		node1.handler.On("OnSubmit", "bar", node3.nodeInfo.ID, mock.Anything).Return(nil)
+
 		node2toNode1, err := node2.c.Remote("foo", node1.nodeInfo.ID)
 		assert.NoError(t, err)
 		node3toNode1, err := node3.c.Remote("bar", node1.nodeInfo.ID)
 		assert.NoError(t, err)
 
-		_, err = node2toNode1.Step(barReq)
+		assertEventualSendMessage(t, node2toNode1, &orderer.SubmitRequest{Channel: "foo"})
+		stream, err := node2toNode1.NewStream(time.Hour)
+		err = stream.Send(barReq)
+		assert.NoError(t, err)
+		_, err = stream.Recv()
 		assert.EqualError(t, err, "rpc error: code = Unknown desc = certificate extracted from TLS connection isn't authorized")
 
-		_, err = node3toNode1.Step(fooReq)
+		assertEventualSendMessage(t, node3toNode1, &orderer.SubmitRequest{Channel: "bar"})
+		stream, err = node3toNode1.NewStream(time.Hour)
+		err = stream.Send(fooReq)
+		assert.NoError(t, err)
+		_, err = stream.Recv()
 		assert.EqualError(t, err, "rpc error: code = Unknown desc = certificate extracted from TLS connection isn't authorized")
 	})
 }
@@ -818,7 +1067,7 @@ func TestConnectionFailure(t *testing.T) {
 	assert.EqualError(t, err, "oops")
 }
 
-func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend *orderer.StepRequest) {
+func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend *orderer.SubmitRequest) {
 	for _, tst := range []struct {
 		label    string
 		sender   *clusterNode
@@ -831,36 +1080,54 @@ func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend 
 		t.Run(tst.label, func(t *testing.T) {
 			stub, err := tst.sender.c.Remote(testChannel, tst.target)
 			assert.NoError(t, err)
-			assertEventuallyConnect(t, stub, msgToSend)
-			msg, err := stub.Step(msgToSend)
-			assert.NoError(t, err)
-			assert.Equal(t, msg.Payload, msgToSend.Payload)
 
-			expectedRes := &orderer.SubmitResponse{}
-			tst.receiver.handler.On("OnSubmit", testChannel, tst.sender.nodeInfo.ID, mock.Anything).Return(expectedRes, nil).Once()
-			stub, err = tst.sender.c.Remote(testChannel, tst.target)
-			assert.NoError(t, err)
-			stream, err := stub.SubmitStream()
-			assert.NoError(t, err)
+			stream := assertEventualEstablishStream(t, stub)
 
-			err = stream.Send(testSubReq)
-			assert.NoError(t, err)
+			var wg sync.WaitGroup
+			wg.Add(1)
+			tst.receiver.handler.On("OnSubmit", testChannel, tst.sender.nodeInfo.ID, mock.Anything).Return(nil).Once().Run(func(args mock.Arguments) {
+				req := args.Get(2).(*orderer.SubmitRequest)
+				assert.True(t, proto.Equal(req, msgToSend))
+				wg.Done()
+			})
 
-			res, err := stream.Recv()
+			err = stream.Send(wrapSubmitReq(msgToSend))
 			assert.NoError(t, err)
 
-			assert.Equal(t, expectedRes, res)
+			wg.Wait()
 		})
 	}
 }
 
-func assertEventuallyConnect(t *testing.T, rpc *cluster.RemoteContext, req *orderer.StepRequest) {
+func assertEventualEstablishStream(t *testing.T, rpc *cluster.RemoteContext) *cluster.Stream {
+	var res *cluster.Stream
 	gt := gomega.NewGomegaWithT(t)
 	gt.Eventually(func() error {
-		_, err := rpc.Step(req)
+		stream, err := rpc.NewStream(time.Hour)
+		res = stream
+		return err
+	}, timeout).Should(gomega.Succeed())
+	return res
+}
+
+func assertEventualSendMessage(t *testing.T, rpc *cluster.RemoteContext, req *orderer.SubmitRequest) orderer.Cluster_StepClient {
+	var res orderer.Cluster_StepClient
+	gt := gomega.NewGomegaWithT(t)
+	gt.Eventually(func() error {
+		stream, err := rpc.NewStream(time.Hour)
 		if err != nil {
 			return err
 		}
-		return nil
+		res = stream
+		return stream.Send(wrapSubmitReq(req))
 	}, timeout).Should(gomega.Succeed())
+	return res
+}
+
+func wrapSubmitReq(req *orderer.SubmitRequest) *orderer.StepRequest {
+	return &orderer.StepRequest{
+		Payload: &orderer.StepRequest_SubmitRequest{
+			SubmitRequest: req,
+		},
+	}
 }

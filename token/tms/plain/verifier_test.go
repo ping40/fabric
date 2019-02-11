@@ -22,6 +22,8 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+const tokenNamespace = "_fabtoken"
+
 var _ = Describe("Verifier", func() {
 	var (
 		fakePublicInfo       *mockid.PublicInfo
@@ -80,12 +82,12 @@ var _ = Describe("Verifier", func() {
 			err := verifier.ProcessTx(importTxID, fakePublicInfo, importTransaction, fakeLedger)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(fakeLedger.SetStateCallCount()).To(Equal(3))
+			Expect(fakeLedger.SetStateCallCount()).To(Equal(2))
 
 			outputBytes, err := proto.Marshal(&token.PlainOutput{Owner: []byte("owner-1"), Type: "TOK1", Quantity: 111})
 			Expect(err).NotTo(HaveOccurred())
 			ns, k, td := fakeLedger.SetStateArgsForCall(0)
-			Expect(ns).To(Equal("tms"))
+			Expect(ns).To(Equal(tokenNamespace))
 			expectedOutput := strings.Join([]string{"", "tokenOutput", "0", "0", ""}, "\x00")
 			Expect(k).To(Equal(expectedOutput))
 			Expect(td).To(Equal(outputBytes))
@@ -93,18 +95,10 @@ var _ = Describe("Verifier", func() {
 			outputBytes, err = proto.Marshal(&token.PlainOutput{Owner: []byte("owner-2"), Type: "TOK2", Quantity: 222})
 			Expect(err).NotTo(HaveOccurred())
 			ns, k, td = fakeLedger.SetStateArgsForCall(1)
-			Expect(ns).To(Equal("tms"))
+			Expect(ns).To(Equal(tokenNamespace))
 			expectedOutput = strings.Join([]string{"", "tokenOutput", "0", "1", ""}, "\x00")
 			Expect(k).To(Equal(expectedOutput))
 			Expect(td).To(Equal(outputBytes))
-
-			ttxBytes, err := proto.Marshal(importTransaction)
-			Expect(err).NotTo(HaveOccurred())
-			ns, k, td = fakeLedger.SetStateArgsForCall(2)
-			Expect(ns).To(Equal("tms"))
-			expectedOutput = strings.Join([]string{"", "tokenTx", "0", ""}, "\x00")
-			Expect(k).To(Equal(expectedOutput))
-			Expect(td).To(Equal(ttxBytes))
 		})
 
 		Context("when policy validation fails", func() {
@@ -214,7 +208,7 @@ var _ = Describe("Verifier", func() {
 		})
 
 		It("retrieves the PlainOutput associated with the entry ID", func() {
-			po, err := memoryLedger.GetState("tms", strings.Join([]string{"", "tokenOutput", "0", "0", ""}, "\x00"))
+			po, err := memoryLedger.GetState(tokenNamespace, strings.Join([]string{"", "tokenOutput", "0", "0", ""}, "\x00"))
 			Expect(err).NotTo(HaveOccurred())
 
 			output := &token.PlainOutput{}
@@ -227,7 +221,7 @@ var _ = Describe("Verifier", func() {
 				Quantity: 111,
 			}))
 
-			po, err = memoryLedger.GetState("tms", strings.Join([]string{"", "tokenOutput", "0", "1", ""}, "\x00"))
+			po, err = memoryLedger.GetState(tokenNamespace, strings.Join([]string{"", "tokenOutput", "0", "1", ""}, "\x00"))
 			Expect(err).NotTo(HaveOccurred())
 
 			err = proto.Unmarshal(po, output)
@@ -242,7 +236,7 @@ var _ = Describe("Verifier", func() {
 
 		Context("when the output does not exist", func() {
 			It("returns a nil and no error", func() {
-				val, err := memoryLedger.GetState("tms", strings.Join([]string{"", "tokenOutput", "george", "0", ""}, "\x00"))
+				val, err := memoryLedger.GetState(tokenNamespace, strings.Join([]string{"", "tokenOutput", "george", "0", ""}, "\x00"))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(val).To(BeNil())
 			})
@@ -329,39 +323,7 @@ var _ = Describe("Verifier", func() {
 				ns, k := fakeLedger.GetStateArgsForCall(0)
 				expectedOutput := strings.Join([]string{"", "tokenOutput", "0", "0", ""}, "\x00")
 				Expect(k).To(Equal(expectedOutput))
-				Expect(ns).To(Equal("tms"))
-			})
-		})
-
-		Context("when the ledger read of a transaction fails", func() {
-			BeforeEach(func() {
-				fakeLedger.GetStateReturnsOnCall(0, nil, nil)
-				fakeLedger.GetStateReturnsOnCall(1, nil, nil)
-				fakeLedger.GetStateReturnsOnCall(2, nil, errors.New("error reading transaction"))
-			})
-
-			It("returns an error", func() {
-				err := verifier.ProcessTx(importTxID, fakePublicInfo, importTransaction, fakeLedger)
-				Expect(err).To(HaveOccurred())
-				Expect(err).To(MatchError("error reading transaction"))
-
-				Expect(fakeLedger.GetStateCallCount()).To(Equal(3))
-				Expect(fakeLedger.SetStateCallCount()).To(Equal(0))
-				ns, k := fakeLedger.GetStateArgsForCall(2)
-				expectedTx := strings.Join([]string{"", "tokenTx", "0", ""}, "\x00")
-				Expect(k).To(Equal(expectedTx))
-				Expect(ns).To(Equal("tms"))
-			})
-		})
-
-		Context("when a tx with the same txID already exists", func() {
-			BeforeEach(func() {
-				fakeLedger.GetStateReturnsOnCall(2, []byte("fake-tx"), nil)
-			})
-
-			It("returns an error", func() {
-				err := verifier.ProcessTx(importTxID, fakePublicInfo, importTransaction, fakeLedger)
-				Expect(err).To(Equal(&customtx.InvalidTxError{Msg: "transaction already exists: 0"}))
+				Expect(ns).To(Equal(tokenNamespace))
 			})
 		})
 	})
@@ -379,7 +341,7 @@ var _ = Describe("Verifier", func() {
 					PlainAction: &token.PlainTokenAction{
 						Data: &token.PlainTokenAction_PlainTransfer{
 							PlainTransfer: &token.PlainTransfer{
-								Inputs: []*token.InputId{
+								Inputs: []*token.TokenId{
 									{TxId: "0", Index: 0},
 								},
 								Outputs: []*token.PlainOutput{
@@ -404,7 +366,7 @@ var _ = Describe("Verifier", func() {
 			})
 
 			It("is processed successfully", func() {
-				po, err := memoryLedger.GetState("tms", string("\x00")+"tokenOutput"+string("\x00")+"1"+string("\x00")+"0"+string("\x00"))
+				po, err := memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenOutput"+string("\x00")+"1"+string("\x00")+"0"+string("\x00"))
 				Expect(err).NotTo(HaveOccurred())
 
 				output := &token.PlainOutput{}
@@ -417,7 +379,7 @@ var _ = Describe("Verifier", func() {
 					Quantity: 99,
 				}))
 
-				po, err = memoryLedger.GetState("tms", string("\x00")+"tokenOutput"+string("\x00")+"1"+string("\x00")+"1"+string("\x00"))
+				po, err = memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenOutput"+string("\x00")+"1"+string("\x00")+"1"+string("\x00"))
 				Expect(err).NotTo(HaveOccurred())
 
 				err = proto.Unmarshal(po, output)
@@ -429,7 +391,7 @@ var _ = Describe("Verifier", func() {
 					Quantity: 12,
 				}))
 
-				spentMarker, err := memoryLedger.GetState("tms", string("\x00")+"tokenInput"+string("\x00")+"0"+string("\x00")+"0"+string("\x00"))
+				spentMarker, err := memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenInput"+string("\x00")+"0"+string("\x00")+"0"+string("\x00"))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(bytes.Equal(spentMarker, plain.TokenInputSpentMarker)).To(BeTrue())
 			})
@@ -442,7 +404,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "wild_pineapple", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -480,7 +442,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "0", Index: 0},
 									},
@@ -508,7 +470,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -535,7 +497,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -582,7 +544,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "2", Index: 0},
 									},
@@ -609,7 +571,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -648,7 +610,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer{
 								PlainTransfer: &token.PlainTransfer{
-									Inputs: []*token.InputId{},
+									Inputs: []*token.TokenId{},
 									Outputs: []*token.PlainOutput{
 										{Owner: []byte("owner-1"), Type: "", Quantity: 0},
 									},
@@ -683,14 +645,14 @@ var _ = Describe("Verifier", func() {
 
 	Describe("Test ProcessTx PlainRedeem with memory ledger", func() {
 		var (
-			inputIds          []*token.InputId
+			tokenIds          []*token.TokenId
 			redeemTxID        string
 			redeemTransaction *token.TokenTransaction
 		)
 
 		BeforeEach(func() {
 			redeemTxID = "r1"
-			inputIds = []*token.InputId{
+			tokenIds = []*token.TokenId{
 				{TxId: "0", Index: 0},
 			}
 			redeemTransaction = &token.TokenTransaction{
@@ -698,7 +660,7 @@ var _ = Describe("Verifier", func() {
 					PlainAction: &token.PlainTokenAction{
 						Data: &token.PlainTokenAction_PlainRedeem{
 							PlainRedeem: &token.PlainTransfer{
-								Inputs: inputIds,
+								Inputs: tokenIds,
 								Outputs: []*token.PlainOutput{
 									{Type: "TOK1", Quantity: 111},
 								},
@@ -719,7 +681,7 @@ var _ = Describe("Verifier", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// verify we can get the output from "tokenRedeem" for this transaction
-			po, err := memoryLedger.GetState("tms", string("\x00")+"tokenRedeem"+string("\x00")+redeemTxID+string("\x00")+"0"+string("\x00"))
+			po, err := memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenRedeem"+string("\x00")+redeemTxID+string("\x00")+"0"+string("\x00"))
 			Expect(err).NotTo(HaveOccurred())
 
 			output := &token.PlainOutput{}
@@ -739,7 +701,7 @@ var _ = Describe("Verifier", func() {
 					PlainAction: &token.PlainTokenAction{
 						Data: &token.PlainTokenAction_PlainRedeem{
 							PlainRedeem: &token.PlainTransfer{
-								Inputs: inputIds,
+								Inputs: tokenIds,
 								Outputs: []*token.PlainOutput{
 									{Type: "TOK1", Quantity: 99},
 									{Owner: []byte("owner-1"), Type: "TOK1", Quantity: 12},
@@ -754,7 +716,7 @@ var _ = Describe("Verifier", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// verify we can get 1 output from "tokenRedeem" and 1 output from "tokenOutput" for this transaction
-			po, err := memoryLedger.GetState("tms", string("\x00")+"tokenRedeem"+string("\x00")+redeemTxID+string("\x00")+"0"+string("\x00"))
+			po, err := memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenRedeem"+string("\x00")+redeemTxID+string("\x00")+"0"+string("\x00"))
 			Expect(err).NotTo(HaveOccurred())
 
 			output := &token.PlainOutput{}
@@ -766,7 +728,7 @@ var _ = Describe("Verifier", func() {
 				Quantity: 99,
 			}))
 
-			po, err = memoryLedger.GetState("tms", string("\x00")+"tokenOutput"+string("\x00")+redeemTxID+string("\x00")+"1"+string("\x00"))
+			po, err = memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenOutput"+string("\x00")+redeemTxID+string("\x00")+"1"+string("\x00"))
 			Expect(err).NotTo(HaveOccurred())
 
 			err = proto.Unmarshal(po, output)
@@ -778,7 +740,7 @@ var _ = Describe("Verifier", func() {
 				Quantity: 12,
 			}))
 
-			spentMarker, err := memoryLedger.GetState("tms", string("\x00")+"tokenInput"+string("\x00")+"0"+string("\x00")+"0"+string("\x00"))
+			spentMarker, err := memoryLedger.GetState(tokenNamespace, string("\x00")+"tokenInput"+string("\x00")+"0"+string("\x00")+"0"+string("\x00"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(bytes.Equal(spentMarker, plain.TokenInputSpentMarker)).To(BeTrue())
 		})
@@ -802,7 +764,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainRedeem{
 								PlainRedeem: &token.PlainTransfer{
-									Inputs: inputIds,
+									Inputs: tokenIds,
 									Outputs: []*token.PlainOutput{
 										{Type: "TOK1", Quantity: 100},
 									},
@@ -848,7 +810,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainRedeem{
 								PlainRedeem: &token.PlainTransfer{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "2", Index: 0},
 									},
@@ -889,7 +851,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainRedeem{
 								PlainRedeem: &token.PlainTransfer{
-									Inputs: inputIds,
+									Inputs: tokenIds,
 									Outputs: []*token.PlainOutput{
 										{Type: "TOK1", Quantity: 99},
 										{Owner: []byte("owner-2"), Type: "TOK1", Quantity: 12},
@@ -915,7 +877,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainRedeem{
 								PlainRedeem: &token.PlainTransfer{
-									Inputs: inputIds,
+									Inputs: tokenIds,
 									Outputs: []*token.PlainOutput{
 										{Type: "TOK1", Quantity: 99},
 										{Type: "TOK1", Quantity: 12},
@@ -972,7 +934,7 @@ var _ = Describe("Verifier", func() {
 					PlainAction: &token.PlainTokenAction{
 						Data: &token.PlainTokenAction_PlainApprove{
 							PlainApprove: &token.PlainApprove{
-								Inputs: []*token.InputId{
+								Inputs: []*token.TokenId{
 									{TxId: "0", Index: 0},
 								},
 								DelegatedOutputs: []*token.PlainDelegatedOutput{
@@ -1032,7 +994,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									DelegatedOutputs: []*token.PlainDelegatedOutput{
@@ -1060,7 +1022,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "0", Index: 0},
 									},
@@ -1087,7 +1049,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									DelegatedOutputs: []*token.PlainDelegatedOutput{
@@ -1113,7 +1075,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									DelegatedOutputs: []*token.PlainDelegatedOutput{
@@ -1148,7 +1110,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "0", Index: 0},
 									},
@@ -1174,7 +1136,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									DelegatedOutputs: []*token.PlainDelegatedOutput{
@@ -1198,7 +1160,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainApprove{
 								PlainApprove: &token.PlainApprove{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									DelegatedOutputs: []*token.PlainDelegatedOutput{
@@ -1225,15 +1187,6 @@ var _ = Describe("Verifier", func() {
 				Expect(err).To(Equal(&customtx.InvalidTxError{Msg: fmt.Sprintf("output already exists: %s", existingOutputId)}))
 			})
 		})
-
-		Context("when a transaction already exists", func() {
-			It("returns an error", func() {
-				fakeLedger.GetStateReturnsOnCall(8, []byte("a tx is already here"), nil)
-				err := verifier.ProcessTx(approveTxID, fakePublicInfo, approveTransaction, fakeLedger)
-				Expect(err).To(HaveOccurred())
-				Expect(err).To(Equal(&customtx.InvalidTxError{Msg: "transaction already exists: 1"}))
-			})
-		})
 	})
 	Describe("Test PlainTransferFrom", func() {
 		var (
@@ -1249,7 +1202,7 @@ var _ = Describe("Verifier", func() {
 					PlainAction: &token.PlainTokenAction{
 						Data: &token.PlainTokenAction_PlainTransfer_From{
 							PlainTransfer_From: &token.PlainTransferFrom{
-								Inputs: []*token.InputId{
+								Inputs: []*token.TokenId{
 									{TxId: "0", Index: 0},
 								},
 								Outputs: []*token.PlainOutput{
@@ -1339,7 +1292,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer_From{
 								PlainTransfer_From: &token.PlainTransferFrom{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "0", Index: 0},
 									},
@@ -1366,7 +1319,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer_From{
 								PlainTransfer_From: &token.PlainTransferFrom{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -1392,7 +1345,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer_From{
 								PlainTransfer_From: &token.PlainTransferFrom{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -1428,7 +1381,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer_From{
 								PlainTransfer_From: &token.PlainTransferFrom{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 										{TxId: "0", Index: 0},
 									},
@@ -1454,7 +1407,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer_From{
 								PlainTransfer_From: &token.PlainTransferFrom{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -1479,7 +1432,7 @@ var _ = Describe("Verifier", func() {
 						PlainAction: &token.PlainTokenAction{
 							Data: &token.PlainTokenAction_PlainTransfer_From{
 								PlainTransfer_From: &token.PlainTransferFrom{
-									Inputs: []*token.InputId{
+									Inputs: []*token.TokenId{
 										{TxId: "0", Index: 0},
 									},
 									Outputs: []*token.PlainOutput{
@@ -1517,13 +1470,5 @@ var _ = Describe("Verifier", func() {
 			})
 		})
 
-		Context("when a transaction already exists", func() {
-			It("returns an error", func() {
-				fakeLedger.GetStateReturnsOnCall(8, []byte("a tx is already here"), nil)
-				err := verifier.ProcessTx(transferFromTxID, fakePublicInfo, transferFromTransaction, fakeLedger)
-				Expect(err).To(HaveOccurred())
-				Expect(err).To(Equal(&customtx.InvalidTxError{Msg: "transaction already exists: 1"}))
-			})
-		})
 	})
 })

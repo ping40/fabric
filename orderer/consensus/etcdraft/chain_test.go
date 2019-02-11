@@ -32,8 +32,10 @@ import (
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/orderer"
 	raftprotos "github.com/hyperledger/fabric/protos/orderer/etcdraft"
+	"github.com/hyperledger/fabric/protos/utils"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/types"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
 	"go.uber.org/zap"
@@ -41,7 +43,7 @@ import (
 
 const (
 	interval            = time.Second
-	LongEventualTimeout = 5 * time.Second
+	LongEventualTimeout = 10 * time.Second
 	ELECTION_TICK       = 2
 	HEARTBEAT_TICK      = 1
 )
@@ -188,6 +190,7 @@ var _ = Describe("Chain", func() {
 
 		AfterEach(func() {
 			chain.Halt()
+			Eventually(chain.Errored, LongEventualTimeout).Should(BeClosed())
 			os.RemoveAll(dataDir)
 		})
 
@@ -359,7 +362,7 @@ var _ = Describe("Chain", func() {
 				errorC := chain.Errored()
 				Expect(errorC).NotTo(BeClosed())
 				chain.Halt()
-				Eventually(errorC).Should(BeClosed())
+				Eventually(errorC, LongEventualTimeout).Should(BeClosed())
 			})
 
 			Describe("Config updates", func() {
@@ -477,7 +480,7 @@ var _ = Describe("Chain", func() {
 						It("should be able to create a channel", func() {
 							err := chain.Configure(configEnv, configSeq)
 							Expect(err).NotTo(HaveOccurred())
-							Eventually(support.WriteConfigBlockCallCount).Should(Equal(1))
+							Eventually(support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
 						})
 					})
 				}) // Context block for type A config
@@ -752,8 +755,6 @@ var _ = Describe("Chain", func() {
 
 				Describe("when snapshotting is enabled (snapshot interval is not zero)", func() {
 					var (
-						m *raftprotos.RaftMetadata
-
 						ledgerLock sync.Mutex
 						ledger     map[uint64]*common.Block
 					)
@@ -765,7 +766,6 @@ var _ = Describe("Chain", func() {
 					}
 
 					BeforeEach(func() {
-						opts.SnapInterval = 2
 						opts.SnapshotCatchUpEntries = 2
 
 						close(cutter.Block)
@@ -794,231 +794,127 @@ var _ = Describe("Chain", func() {
 						}
 					})
 
-					JustBeforeEach(func() {
-						err = chain.Order(env, uint64(0))
-						Expect(err).NotTo(HaveOccurred())
-						Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
-
-						err = chain.Order(env, uint64(0))
-						Expect(err).NotTo(HaveOccurred())
-						Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
-
-						_, metadata := support.WriteBlockArgsForCall(1)
-						m = &raftprotos.RaftMetadata{}
-						proto.Unmarshal(metadata, m)
-					})
-
-					It("writes snapshot file to snapDir", func() {
-						// Scenario: start a chain with SnapInterval = 1, expect it to take
-						// one snapshot after ordering 3 blocks.
-						//
-						// block number starts from 0, and we determine if snapshot should be taken by:
-						//        appliedBlockNum - snapBlockNum < SnapInterval
-
-						Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
-						Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", 1))
-
-						// chain should still be functioning
-						err = chain.Order(env, uint64(0))
-						Expect(err).NotTo(HaveOccurred())
-						Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(3))
-					})
-
-					It("pauses chain if sync is in progress", func() {
-						// Scenario:
-						// after a snapshot is taken, reboot chain with raftIndex = 0
-						// chain should attempt to sync upon reboot, and blocks on
-						// `WaitReady` API
-
-						// check snapshot does exit
-						Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
-
-						chain.Halt()
-
-						c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
-						c.init()
-
-						signal := make(chan struct{})
-
-						c.puller.PullBlockStub = func(i uint64) *common.Block {
-							<-signal // blocking for assertions
-							ledgerLock.Lock()
-							defer ledgerLock.Unlock()
-							if i >= uint64(len(ledger)) {
-								return nil
-							}
-
-							return ledger[i]
-						}
-
-						err := c.WaitReady()
-						Expect(err).To(MatchError("chain is not started"))
-
-						c.Start()
-						defer c.Halt()
-
-						// pull block is called, so chain should be catching up now, WaitReady should block
-						signal <- struct{}{}
-
-						done := make(chan error)
-						go func() {
-							done <- c.WaitReady()
-						}()
-
-						Consistently(done).ShouldNot(Receive())
-						close(signal) // unblock block puller
-
-						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
-					})
-
-					It("restores snapshot w/o extra entries", func() {
-						// Scenario:
-						// after a snapshot is taken, no more entries are appended.
-						// then node is restarted, it loads snapshot, finds its term
-						// and index. While replaying WAL to memory storage, it should
-						// not append any entry because no extra entry was appended
-						// after snapshot was taken.
-
-						Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
-						Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", 1))
-						snapshot, err := opts.MemoryStorage.Snapshot() // get the snapshot just created
-						Expect(err).NotTo(HaveOccurred())
-						i, err := opts.MemoryStorage.FirstIndex() // get the first index in memory
-						Expect(err).NotTo(HaveOccurred())
-
-						// expect storage to preserve SnapshotCatchUpEntries entries before snapshot
-						Expect(i).To(Equal(snapshot.Metadata.Index - opts.SnapshotCatchUpEntries + 1))
-
-						chain.Halt()
-
-						raftMetadata.RaftIndex = m.RaftIndex
-						c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
-
-						c.init()
-						c.Start()
-						defer c.Halt()
-
-						// following arithmetic reflects how etcdraft MemoryStorage is implemented
-						// when no entry is appended after snapshot being loaded.
-						Eventually(c.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(Equal(snapshot.Metadata.Index + 1))
-						Eventually(c.opts.MemoryStorage.LastIndex, LongEventualTimeout).Should(Equal(snapshot.Metadata.Index))
-
-						// chain keeps functioning
-						Eventually(func() bool {
-							c.clock.Increment(interval)
-							select {
-							case <-c.observe:
-								return true
-							default:
-								return false
-							}
-						}, LongEventualTimeout).Should(BeTrue())
-
-						c.cutter.CutNext = true
-						err = c.Order(env, uint64(0))
-						Expect(err).NotTo(HaveOccurred())
-						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
-					})
-
-					It("restores snapshot w/ extra entries", func() {
-						// Scenario:
-						// after a snapshot is taken, more entries are appended.
-						// then node is restarted, it loads snapshot, finds its term
-						// and index. While replaying WAL to memory storage, it should
-						// append some entries.
-
-						// check snapshot does exit
-						Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
-						Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", 1))
-						snapshot, err := opts.MemoryStorage.Snapshot() // get the snapshot just created
-						Expect(err).NotTo(HaveOccurred())
-						i, err := opts.MemoryStorage.FirstIndex() // get the first index in memory
-						Expect(err).NotTo(HaveOccurred())
-
-						// expect storage to preserve SnapshotCatchUpEntries entries before snapshot
-						Expect(i).To(Equal(snapshot.Metadata.Index - opts.SnapshotCatchUpEntries + 1))
-
-						err = chain.Order(env, uint64(0))
-						Expect(err).NotTo(HaveOccurred())
-						Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(3))
-
-						lasti, _ := opts.MemoryStorage.LastIndex()
-
-						chain.Halt()
-
-						raftMetadata.RaftIndex = m.RaftIndex
-						c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
-						c.support.HeightReturns(5)
-						c.support.BlockReturns(&common.Block{
-							Header:   &common.BlockHeader{},
-							Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
-							Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
+					Context("Small SnapshotInterval", func() {
+						BeforeEach(func() {
+							opts.SnapInterval = 1
 						})
 
-						c.init()
-						c.Start()
-						defer c.Halt()
+						It("writes snapshot file to snapDir", func() {
+							// Scenario: start a chain with SnapInterval = 1 byte, expect it to take
+							// one snapshot for each block
 
-						Eventually(c.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(Equal(snapshot.Metadata.Index + 1))
-						Eventually(c.opts.MemoryStorage.LastIndex, LongEventualTimeout).Should(Equal(lasti))
+							i, _ := opts.MemoryStorage.FirstIndex()
 
-						// chain keeps functioning
-						Eventually(func() bool {
-							c.clock.Increment(interval)
-							select {
-							case <-c.observe:
-								return true
-							default:
-								return false
-							}
-						}, LongEventualTimeout).Should(BeTrue())
-
-						c.cutter.CutNext = true
-						err = c.Order(env, uint64(0))
-						Expect(err).NotTo(HaveOccurred())
-						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
-					})
-
-					When("local ledger is in sync with snapshot", func() {
-						It("does not pull blocks and still respects snapshot interval", func() {
-							// Scenario:
-							// - snapshot is taken at block 2
-							// - order one more envelope (block 3)
-							// - reboot chain at block 2
-							// - block 3 should be replayed from wal
-							// - order another envelope to trigger snapshot, containing block 3 & 4
-							// Assertions:
-							// - block puller should NOT be called
-							// - chain should keep functioning after reboot
-							// - chain should respect snapshot interval to trigger next snapshot
-
-							// check snapshot does exit
+							Expect(chain.Order(env, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 							Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
+							Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
 
-							// order another envelope. this should not trigger snapshot
-							err = chain.Order(env, uint64(0))
+							i, _ = opts.MemoryStorage.FirstIndex()
+
+							Expect(chain.Order(env, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+							Eventually(countFiles, LongEventualTimeout).Should(Equal(2))
+							Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
+						})
+
+						It("pauses chain if sync is in progress", func() {
+							// Scenario:
+							// after a snapshot is taken, reboot chain with raftIndex = 0
+							// chain should attempt to sync upon reboot, and blocks on
+							// `WaitReady` API
+
+							i, _ := opts.MemoryStorage.FirstIndex()
+
+							Expect(chain.Order(env, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+							Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
+							Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
+
+							i, _ = opts.MemoryStorage.FirstIndex()
+
+							Expect(chain.Order(env, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+							Eventually(countFiles, LongEventualTimeout).Should(Equal(2))
+							Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
+
+							chain.Halt()
+
+							c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
+							c.init()
+
+							signal := make(chan struct{})
+
+							c.puller.PullBlockStub = func(i uint64) *common.Block {
+								<-signal // blocking for assertions
+								ledgerLock.Lock()
+								defer ledgerLock.Unlock()
+								if i >= uint64(len(ledger)) {
+									return nil
+								}
+
+								return ledger[i]
+							}
+
+							err := c.WaitReady()
+							Expect(err).To(MatchError("chain is not started"))
+
+							c.Start()
+							defer c.Halt()
+
+							// pull block is called, so chain should be catching up now, WaitReady should block
+							signal <- struct{}{}
+
+							done := make(chan error)
+							go func() {
+								done <- c.WaitReady()
+							}()
+
+							Consistently(done).ShouldNot(Receive())
+							close(signal)                         // unblock block puller
+							Eventually(done).Should(Receive(nil)) // WaitReady should be unblocked
+							Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+						})
+
+						It("restores snapshot w/o extra entries", func() {
+							// Scenario:
+							// after a snapshot is taken, no more entries are appended.
+							// then node is restarted, it loads snapshot, finds its term
+							// and index. While replaying WAL to memory storage, it should
+							// not append any entry because no extra entry was appended
+							// after snapshot was taken.
+
+							Expect(chain.Order(env, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+							_, metadata := support.WriteBlockArgsForCall(0)
+							m := &raftprotos.RaftMetadata{}
+							proto.Unmarshal(metadata, m)
+
+							Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
+							Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", 1))
+							snapshot, err := opts.MemoryStorage.Snapshot() // get the snapshot just created
 							Expect(err).NotTo(HaveOccurred())
-							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(3))
+							i, err := opts.MemoryStorage.FirstIndex() // get the first index in memory
+							Expect(err).NotTo(HaveOccurred())
+
+							// expect storage to preserve SnapshotCatchUpEntries entries before snapshot
+							Expect(i).To(Equal(snapshot.Metadata.Index - opts.SnapshotCatchUpEntries + 1))
 
 							chain.Halt()
 
 							raftMetadata.RaftIndex = m.RaftIndex
 							c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
-							// start chain at block 2 (height = 3)
-
-							c.support.HeightReturns(3)
-							c.support.BlockReturns(&common.Block{
-								Header:   &common.BlockHeader{},
-								Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
-								Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
-							})
-							c.opts.SnapInterval = 2
 
 							c.init()
 							c.Start()
 							defer c.Halt()
 
-							// elect leader
+							// following arithmetic reflects how etcdraft MemoryStorage is implemented
+							// when no entry is appended after snapshot being loaded.
+							Eventually(c.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(Equal(snapshot.Metadata.Index + 1))
+							Eventually(c.opts.MemoryStorage.LastIndex, LongEventualTimeout).Should(Equal(snapshot.Metadata.Index))
+
+							// chain keeps functioning
 							Eventually(func() bool {
 								c.clock.Increment(interval)
 								select {
@@ -1032,10 +928,157 @@ var _ = Describe("Chain", func() {
 							c.cutter.CutNext = true
 							err = c.Order(env, uint64(0))
 							Expect(err).NotTo(HaveOccurred())
+							Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+						})
+					})
 
-							Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
-							Expect(c.puller.PullBlockCallCount()).Should(BeZero())
-							Eventually(countFiles, LongEventualTimeout).Should(Equal(2))
+					Context("Large SnapshotInterval", func() {
+						BeforeEach(func() {
+							opts.SnapInterval = 1024
+						})
+
+						It("restores snapshot w/ extra entries", func() {
+							// Scenario:
+							// after a snapshot is taken, more entries are appended.
+							// then node is restarted, it loads snapshot, finds its term
+							// and index. While replaying WAL to memory storage, it should
+							// append some entries.
+
+							largeEnv := &common.Envelope{
+								Payload: marshalOrPanic(&common.Payload{
+									Header: &common.Header{ChannelHeader: marshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: channelID})},
+									Data:   make([]byte, 500),
+								}),
+							}
+
+							By("Ordering two large envelopes to trigger snapshot")
+							Expect(chain.Order(largeEnv, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+
+							Expect(chain.Order(largeEnv, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+
+							_, metadata := support.WriteBlockArgsForCall(1)
+							m := &raftprotos.RaftMetadata{}
+							proto.Unmarshal(metadata, m)
+
+							// check snapshot does exit
+							Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
+							Eventually(opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", 1))
+							snapshot, err := opts.MemoryStorage.Snapshot() // get the snapshot just created
+							Expect(err).NotTo(HaveOccurred())
+							i, err := opts.MemoryStorage.FirstIndex() // get the first index in memory
+							Expect(err).NotTo(HaveOccurred())
+
+							// expect storage to preserve SnapshotCatchUpEntries entries before snapshot
+							Expect(i).To(Equal(snapshot.Metadata.Index - opts.SnapshotCatchUpEntries + 1))
+
+							By("Ordering another envlope to append new data to memory after snaphost")
+							Expect(chain.Order(env, uint64(0))).To(Succeed())
+							Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(3))
+
+							lasti, _ := opts.MemoryStorage.LastIndex()
+
+							chain.Halt()
+
+							raftMetadata.RaftIndex = m.RaftIndex
+							c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
+							c.support.HeightReturns(5)
+							c.support.BlockReturns(&common.Block{
+								Header:   &common.BlockHeader{},
+								Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
+								Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
+							})
+
+							By("Restarting the node")
+							c.init()
+							c.Start()
+							defer c.Halt()
+
+							By("Checking latest index is larger than index in snapshot")
+							Eventually(c.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(Equal(snapshot.Metadata.Index + 1))
+							Eventually(c.opts.MemoryStorage.LastIndex, LongEventualTimeout).Should(Equal(lasti))
+						})
+
+						When("local ledger is in sync with snapshot", func() {
+							It("does not pull blocks and still respects snapshot interval", func() {
+								// Scenario:
+								// - snapshot is taken at block 2
+								// - order one more envelope (block 3)
+								// - reboot chain at block 2
+								// - block 3 should be replayed from wal
+								// - order another envelope to trigger snapshot, containing block 3 & 4
+								// Assertions:
+								// - block puller should NOT be called
+								// - chain should keep functioning after reboot
+								// - chain should respect snapshot interval to trigger next snapshot
+
+								largeEnv := &common.Envelope{
+									Payload: marshalOrPanic(&common.Payload{
+										Header: &common.Header{ChannelHeader: marshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_MESSAGE), ChannelId: channelID})},
+										Data:   make([]byte, 500),
+									}),
+								}
+
+								By("Ordering two large envelopes to trigger snapshot")
+								Expect(chain.Order(largeEnv, uint64(0))).To(Succeed())
+								Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+
+								Expect(chain.Order(largeEnv, uint64(0))).To(Succeed())
+								Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+
+								Eventually(countFiles, LongEventualTimeout).Should(Equal(1))
+
+								_, metadata := support.WriteBlockArgsForCall(1)
+								m := &raftprotos.RaftMetadata{}
+								proto.Unmarshal(metadata, m)
+
+								By("Cutting block 3")
+								// order another envelope. this should not trigger snapshot
+								err = chain.Order(largeEnv, uint64(0))
+								Expect(err).NotTo(HaveOccurred())
+								Eventually(support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(3))
+
+								chain.Halt()
+
+								raftMetadata.RaftIndex = m.RaftIndex
+								c := newChain(10*time.Second, channelID, dataDir, 1, raftMetadata)
+								// start chain at block 2 (height = 3)
+
+								c.support.HeightReturns(3)
+								c.support.BlockReturns(&common.Block{
+									Header:   &common.BlockHeader{},
+									Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
+									Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
+								})
+								c.opts.SnapInterval = 1024
+
+								By("Restarting node at block 2")
+								c.init()
+								c.Start()
+								defer c.Halt()
+
+								// elect leader
+								Eventually(func() bool {
+									c.clock.Increment(interval)
+									select {
+									case <-c.observe:
+										return true
+									default:
+										return false
+									}
+								}, LongEventualTimeout).Should(BeTrue())
+
+								By("Ordering one more block to trigger snapshot")
+								c.cutter.CutNext = true
+								err = c.Order(largeEnv, uint64(0))
+								Expect(err).NotTo(HaveOccurred())
+
+								Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
+								Expect(c.puller.PullBlockCallCount()).Should(BeZero())
+								// old snapshot file is retained
+								Eventually(countFiles, LongEventualTimeout).Should(Equal(2))
+							})
 						})
 					})
 				})
@@ -1461,16 +1504,9 @@ var _ = Describe("Chain", func() {
 					c4.support.WriteConfigBlock(c1.support.WriteConfigBlockArgsForCall(0))
 
 					network.addChain(c4)
-					c4.Start()
-
-					// ConfChange is applied to etcd/raft asynchronously, meaning node 4 is not added
-					// to leader's node list right away. An immediate tick does not trigger a heartbeat
-					// being sent to node 4. Therefore, we repeatedly tick the leader until node 4 joins
-					// the cluster successfully.
-					Eventually(func() <-chan raft.SoftState {
-						c1.clock.Increment(interval)
-						return c4.observe
-					}, defaultTimeout).Should(Receive(Equal(raft.SoftState{Lead: 1, RaftState: raft.StateFollower})))
+					c4.start()
+					Expect(c4.WaitReady()).To(Succeed())
+					network.join(4, true)
 
 					Eventually(c4.support.WriteBlockCallCount, defaultTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, defaultTimeout).Should(Equal(1))
@@ -1479,6 +1515,7 @@ var _ = Describe("Chain", func() {
 					c1.cutter.CutNext = true
 					err = c4.Order(env, 0)
 					Expect(err).ToNot(HaveOccurred())
+					Eventually(c4.support.WriteBlockCallCount, defaultTimeout).Should(Equal(2))
 
 					// elect newly added node to be the leader
 					network.elect(4)
@@ -1516,14 +1553,18 @@ var _ = Describe("Chain", func() {
 					configEnv := newConfigEnv(channelID, common.HeaderType_CONFIG, newConfigUpdateEnv(channelID, addConsenterConfigValue()))
 					c1.cutter.CutNext = true
 
-					stub := c1.support.WriteConfigBlockStub
-					c1.support.WriteConfigBlockStub = func(block *common.Block, metadata []byte) {
-						stub(block, metadata)
-						// disconnect leader after block being committed
-						network.disconnect(1)
-						// electing new leader
-						network.elect(2)
-					}
+					step1 := c1.getStepFunc()
+					count := c1.rpc.SendConsensusCallCount() // record current step call count
+					c1.setStepFunc(func(dest uint64, msg *orderer.ConsensusRequest) error {
+						// disconnect network after 4 MsgApp are sent by c1:
+						// - 2 MsgApp to c2 & c3 that replicate data to raft followers
+						// - 2 MsgApp to c2 & c3 that instructs followers to commit data
+						if c1.rpc.SendConsensusCallCount() == count+4 {
+							defer network.disconnect(1)
+						}
+
+						return step1(dest, msg)
+					})
 
 					By("sending config transaction")
 					err := c1.Configure(configEnv, 0)
@@ -1534,6 +1575,8 @@ var _ = Describe("Chain", func() {
 						func(c *chain) {
 							Eventually(c.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
 						})
+					c1.setStepFunc(step1)
+					network.elect(2)
 
 					_, raftmetabytes := c1.support.WriteConfigBlockArgsForCall(0)
 					meta := &common.Metadata{Value: raftmetabytes}
@@ -1549,15 +1592,9 @@ var _ = Describe("Chain", func() {
 					c4.support.WriteConfigBlock(c1.support.WriteConfigBlockArgsForCall(0))
 
 					network.addChain(c4)
-					c4.Start()
-					// ConfChange is applied to etcd/raft asynchronously, meaning node 4 is not added
-					// to leader's node list right away. An immediate tick does not trigger a heartbeat
-					// being sent to node 4. Therefore, we repeatedly tick the leader until node 4 joins
-					// the cluster successfully.
-					Eventually(func() <-chan raft.SoftState {
-						c2.clock.Increment(interval)
-						return c4.observe
-					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 2, RaftState: raft.StateFollower})))
+					c4.start()
+					Expect(c4.WaitReady()).To(Succeed())
+					network.join(4, true)
 
 					Eventually(c4.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
@@ -1593,12 +1630,12 @@ var _ = Describe("Chain", func() {
 					c1.cutter.CutNext = true
 
 					step1 := c1.getStepFunc()
-					count := c1.rpc.StepCallCount() // record current step call count
-					c1.setStepFunc(func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+					count := c1.rpc.SendConsensusCallCount() // record current step call count
+					c1.setStepFunc(func(dest uint64, msg *orderer.ConsensusRequest) error {
 						// disconnect network after 4 MsgApp are sent by c1:
 						// - 2 MsgApp to c2 & c3 that replicate data to raft followers
 						// - 2 MsgApp to c2 & c3 that instructs followers to commit data
-						if c1.rpc.StepCallCount() == count+4 {
+						if c1.rpc.SendConsensusCallCount() == count+4 {
 							defer func() {
 								network.disconnect(1)
 								network.disconnect(2)
@@ -1639,16 +1676,12 @@ var _ = Describe("Chain", func() {
 						network.connect(i)
 					}
 
-					c4.Start()
-
 					By("re-elect node 2 to be a leader")
 					network.elect(2)
 
-					By("confirm new node observed a leader node")
-					Eventually(func() <-chan raft.SoftState {
-						c2.clock.Increment(interval)
-						return c4.observe
-					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 2, RaftState: raft.StateFollower})))
+					c4.start()
+					Expect(c4.WaitReady()).To(Succeed())
+					network.join(4, false)
 
 					Eventually(c4.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 					Eventually(c4.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
@@ -1678,28 +1711,29 @@ var _ = Describe("Chain", func() {
 
 					c1.cutter.CutNext = true
 
-					stub := c1.support.WriteConfigBlockStub
-					c1.support.WriteConfigBlockStub = func(block *common.Block, metadata []byte) {
-						stub(block, metadata)
-						// disconnect leader after block being committed
-						network.disconnect(1)
-					}
+					step1 := c1.getStepFunc()
+					count := c1.rpc.SendConsensusCallCount() // record current step call count
+					c1.setStepFunc(func(dest uint64, msg *orderer.ConsensusRequest) error {
+						// disconnect network after 4 MsgApp are sent by c1:
+						// - 2 MsgApp to c2 & c3 that replicate data to raft followers
+						// - 2 MsgApp to c2 & c3 that instructs followers to commit data
+						if c1.rpc.SendConsensusCallCount() == count+4 {
+							defer network.disconnect(1)
+						}
+
+						return step1(dest, msg)
+					})
 
 					By("sending config transaction")
 					err := c1.Configure(configEnv, 0)
 					Expect(err).ToNot(HaveOccurred())
 
-					Eventually(c1.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
-					// Defer assertions on c2&c3 after c2 being elected because we may disconnect c1 too
-					// quickly, and the MsgApps it sends to c2/c3 are dropped. Therefore, this config block
-					// on c2/c3 has not been committed yet. After c2 being elected, new leader will continue
-					// the effort to commit config block, if it's not done yet.
+					network.exec(func(c *chain) {
+						Eventually(c.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
+					})
 
 					// electing new leader
 					network.elect(2)
-
-					Eventually(c2.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
-					Eventually(c3.support.WriteConfigBlockCallCount, LongEventualTimeout).Should(Equal(1))
 
 					By("submitting new transaction to follower")
 					c2.cutter.CutNext = true
@@ -1709,8 +1743,6 @@ var _ = Describe("Chain", func() {
 					// rest nodes are alive include a newly added, hence should write 2 blocks
 					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 					Eventually(c3.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
-					// node 1 has been removed from replica set should not be getting any blocks
-					Consistently(c1.support.WriteBlockCallCount).Should(Equal(1))
 				})
 
 				It("removes leader from replica set", func() {
@@ -1788,7 +1820,7 @@ var _ = Describe("Chain", func() {
 
 				network.exec(
 					func(c *chain) {
-						Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(1))
+						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 					})
 
 				By("respect batch timeout")
@@ -1801,7 +1833,7 @@ var _ = Describe("Chain", func() {
 				c1.clock.WaitForNWatchersAndIncrement(timeout, 2)
 				network.exec(
 					func(c *chain) {
-						Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(2))
+						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 					})
 			})
 
@@ -1826,7 +1858,7 @@ var _ = Describe("Chain", func() {
 				c1.clock.WaitForNWatchersAndIncrement(timeout, 2)
 				network.exec(
 					func(c *chain) {
-						Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(2))
+						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 					})
 			})
 
@@ -1844,6 +1876,7 @@ var _ = Describe("Chain", func() {
 
 					doneProp := make(chan struct{})
 					go func() {
+						defer GinkgoRecover()
 						Expect(c1.Order(env, 0)).To(Succeed())
 						close(doneProp)
 					}()
@@ -1856,9 +1889,9 @@ var _ = Describe("Chain", func() {
 					network.connect(1)
 					c1.clock.Increment(interval)
 
-					Eventually(doneProp).Should(BeClosed())
+					Eventually(doneProp, LongEventualTimeout).Should(BeClosed())
 					network.exec(func(c *chain) {
-						Eventually(c.support.WriteBlockCallCount).Should(Equal(2))
+						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 					})
 				})
 
@@ -1885,17 +1918,39 @@ var _ = Describe("Chain", func() {
 
 					network.elect(2)
 					Expect(c3.Order(env, 0)).To(Succeed())
-					Eventually(c1.support.WriteBlockCallCount).Should(Equal(0))
-					Eventually(c2.support.WriteBlockCallCount).Should(Equal(1))
-					Eventually(c3.support.WriteBlockCallCount).Should(Equal(1))
+					Eventually(c1.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(0))
+					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+					Eventually(c3.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 
 					network.connect(1)
 					c2.clock.Increment(interval)
 
-					Eventually(doneProp).Should(BeClosed())
+					Eventually(doneProp, LongEventualTimeout).Should(BeClosed())
 					network.exec(func(c *chain) {
-						Eventually(c.support.WriteBlockCallCount).Should(Equal(2))
+						Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 					})
+				})
+			})
+
+			When("leader is disconnected", func() {
+				It("proactively steps down to follower", func() {
+					network.disconnect(1)
+
+					By("Ticking leader until it steps down")
+					Eventually(func() <-chan raft.SoftState {
+						c1.clock.Increment(interval)
+						return c1.observe
+					}, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: 0, RaftState: raft.StateFollower})))
+
+					By("Ensuring it does not accept message due to the cluster being leaderless")
+					err := c1.Order(env, 0)
+					Expect(err).To(MatchError("no Raft leader"))
+
+					network.elect(2)
+					network.join(1, true)
+
+					err = c1.Order(env, 0)
+					Expect(err).NotTo(HaveOccurred())
 				})
 			})
 
@@ -1953,18 +2008,20 @@ var _ = Describe("Chain", func() {
 				network.disconnect(1)
 
 				c1.cutter.CutNext = true
-				for i := 0; i < 10; i++ {
-					err := c1.Order(env, 0)
-					Expect(err).NotTo(HaveOccurred())
+				for i := 0; i < 3; i++ {
+					Expect(c1.Order(env, 0)).To(Succeed())
 				}
 
-				network.connect(1)
-				c1.clock.Increment(interval)
+				Consistently(c1.support.WriteBlockCallCount).Should(Equal(0))
 
-				network.exec(
-					func(c *chain) {
-						Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(10))
-					})
+				network.connect(1)
+
+				// Enque another env to trigger resend of previous data
+				Expect(c1.Order(env, 0)).To(Succeed())
+
+				network.exec(func(c *chain) {
+					Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(4))
+				})
 			})
 
 			It("new leader should wait for in-fight blocks to commit before accepting new env", func() {
@@ -1988,16 +2045,16 @@ var _ = Describe("Chain", func() {
 				c2.cutter.CutNext = true
 
 				step1 := c1.getStepFunc()
-				c1.setStepFunc(func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+				c1.setStepFunc(func(dest uint64, msg *orderer.ConsensusRequest) error {
 					stepMsg := &raftpb.Message{}
 					Expect(proto.Unmarshal(msg.Payload, stepMsg)).NotTo(HaveOccurred())
 
 					if dest == 3 {
-						return nil, nil
+						return nil
 					}
 
 					if stepMsg.Type == raftpb.MsgApp && len(stepMsg.Entries) == 0 {
-						return nil, nil
+						return nil
 					}
 
 					return step1(dest, msg)
@@ -2012,14 +2069,14 @@ var _ = Describe("Chain", func() {
 				network.disconnect(1)
 
 				step2 := c2.getStepFunc()
-				c2.setStepFunc(func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+				c2.setStepFunc(func(dest uint64, msg *orderer.ConsensusRequest) error {
 					stepMsg := &raftpb.Message{}
 					Expect(proto.Unmarshal(msg.Payload, stepMsg)).NotTo(HaveOccurred())
 
 					if stepMsg.Type == raftpb.MsgApp && len(stepMsg.Entries) != 0 && dest == 3 {
 						for _, ent := range stepMsg.Entries {
 							if len(ent.Data) != 0 {
-								return nil, nil
+								return nil
 							}
 						}
 					}
@@ -2029,6 +2086,7 @@ var _ = Describe("Chain", func() {
 				network.elect(2)
 
 				go func() {
+					defer GinkgoRecover()
 					Expect(c2.Order(env, 0)).NotTo(HaveOccurred())
 				}()
 
@@ -2159,7 +2217,7 @@ var _ = Describe("Chain", func() {
 
 					network.exec(
 						func(c *chain) {
-							Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(2))
+							Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(2))
 						})
 
 					Eventually(c1.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
@@ -2171,10 +2229,10 @@ var _ = Describe("Chain", func() {
 
 					network.exec(
 						func(c *chain) {
-							Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(3))
+							Eventually(c.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(3))
 						})
 
-					Eventually(c1.opts.MemoryStorage.FirstIndex).Should(BeNumerically(">", i))
+					Eventually(c1.opts.MemoryStorage.FirstIndex, LongEventualTimeout).Should(BeNumerically(">", i))
 				})
 
 				It("lagged node can catch up using snapshot", func() {
@@ -2182,19 +2240,33 @@ var _ = Describe("Chain", func() {
 
 					c1.cutter.CutNext = true
 
-					for i := 1; i <= 10; i++ {
+					var lasti uint64
+					var indices []uint64
+					// Only produce 4 blocks here, so that snapshot pruning does not occur.
+					// Otherwise, a slow garbage collection may prevent snapshotting from
+					// being triggered on next block, and assertion on number of snapshots
+					// would fail nondeterministically.
+					for i := 1; i <= 4; i++ {
 						err := c1.Order(env, 0)
 						Expect(err).NotTo(HaveOccurred())
 						Eventually(c1.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(i))
 						Eventually(c3.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(i))
+						Eventually(func() uint64 {
+							indices = etcdraft.ListSnapshots(logger, c1.opts.SnapDir)
+							if len(indices) == 0 {
+								return 0
+							}
+							return indices[len(indices)-1]
+						}, LongEventualTimeout).Should(BeNumerically(">", lasti))
+						lasti = indices[len(indices)-1]
 					}
 
 					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(0))
 
-					network.rejoin(2, false)
+					network.join(2, false)
 
-					Eventually(c2.puller.PullBlockCallCount, LongEventualTimeout).Should(Equal(10))
-					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(10))
+					Eventually(c2.puller.PullBlockCallCount, LongEventualTimeout).Should(Equal(4))
+					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(4))
 
 					files, err := ioutil.ReadDir(c2.opts.SnapDir)
 					Expect(err).NotTo(HaveOccurred())
@@ -2206,7 +2278,7 @@ var _ = Describe("Chain", func() {
 
 					network.exec(
 						func(c *chain) {
-							Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(11))
+							Eventually(func() int { return c.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(5))
 						})
 				})
 			})
@@ -2274,9 +2346,9 @@ var _ = Describe("Chain", func() {
 					err := c1.Order(env, 0)
 					Expect(err).NotTo(HaveOccurred())
 
-					Eventually(c1.support.WriteBlockCallCount).Should(Equal(1))
-					Eventually(c2.support.WriteBlockCallCount).Should(Equal(0))
-					Eventually(c3.support.WriteBlockCallCount).Should(Equal(1))
+					Eventually(c1.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
+					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(0))
+					Eventually(c3.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(1))
 
 					network.connect(2)
 
@@ -2302,7 +2374,7 @@ var _ = Describe("Chain", func() {
 					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(0))
 					Eventually(c3.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(10))
 
-					network.rejoin(2, false)
+					network.join(2, false)
 					Eventually(c2.support.WriteBlockCallCount, LongEventualTimeout).Should(Equal(10))
 
 					network.disconnect(1)
@@ -2310,21 +2382,19 @@ var _ = Describe("Chain", func() {
 				})
 
 				It("purges blockcutter, stops timer and discards created blocks if leadership is lost", func() {
-					// create one block on chain 1 to test for reset of the created blocks
-					network.disconnect(1)
-
 					// enqueue one transaction into 1's blockcutter to test for purging of block cutter
 					c1.cutter.CutNext = false
 					err := c1.Order(env, 0)
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(c1.cutter.CurBatch, LongEventualTimeout).Should(HaveLen(1))
 
-					// the created block should not be written since leader should not be able to get votes
-					// the block due to the network disconnectivity.
+					// no block should be written because env is not cut into block yet
+					c1.clock.WaitForNWatchersAndIncrement(interval, 2)
 					Consistently(c1.support.WriteBlockCallCount).Should(Equal(0))
 
+					network.disconnect(1)
 					network.elect(2)
-					network.rejoin(1, true)
+					network.join(1, true)
 
 					Eventually(c1.clock.WatcherCount, LongEventualTimeout).Should(Equal(1)) // blockcutter time is stopped
 					Eventually(c1.cutter.CurBatch, LongEventualTimeout).Should(HaveLen(0))
@@ -2332,7 +2402,7 @@ var _ = Describe("Chain", func() {
 					Consistently(c1.support.WriteBlockCallCount).Should(Equal(0))
 
 					network.disconnect(2)
-					n := network.elect(1) // advances 1's clock by n intervals
+					network.elect(1)
 
 					err = c1.Order(env, 0)
 					Expect(err).ToNot(HaveOccurred())
@@ -2360,11 +2430,11 @@ var _ = Describe("Chain", func() {
 					//                at this point of time     it should fire
 					//                timer should not fire     at this point
 
-					c1.clock.WaitForNWatchersAndIncrement(timeout-time.Duration(n*int(interval/time.Millisecond)), 2)
+					c1.clock.WaitForNWatchersAndIncrement(timeout-interval, 2)
 					Eventually(func() int { return c1.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(0))
 					Eventually(func() int { return c3.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(0))
 
-					c1.clock.Increment(time.Duration(n * int(interval/time.Millisecond)))
+					c1.clock.Increment(interval)
 					Eventually(func() int { return c1.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(1))
 					Eventually(func() int { return c3.support.WriteBlockCallCount() }, LongEventualTimeout).Should(Equal(1))
 				})
@@ -2468,7 +2538,7 @@ func marshalOrPanic(pb proto.Message) []byte {
 }
 
 // helpers to facilitate tests
-type stepFunc func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error)
+type stepFunc func(dest uint64, msg *orderer.ConsensusRequest) error
 
 type chain struct {
 	id uint64
@@ -2593,9 +2663,21 @@ func newChain(timeout time.Duration, channel string, dataDir string, id uint64, 
 }
 
 func (c *chain) init() {
-	ch, err := etcdraft.NewChain(c.support, c.opts, c.configurator, c.rpc, c.puller, c.observe)
+	ch, err := etcdraft.NewChain(
+		c.support,
+		c.opts,
+		c.configurator,
+		c.rpc,
+		func() (etcdraft.BlockPuller, error) { return c.puller, nil },
+		c.observe,
+	)
 	Expect(err).NotTo(HaveOccurred())
 	c.Chain = ch
+}
+
+func (c *chain) start() {
+	c.unstarted = nil
+	c.Start()
 }
 
 func (c *chain) setStepFunc(f stepFunc) {
@@ -2638,7 +2720,7 @@ func (n *network) addConnection(id uint64) {
 func (n *network) addChain(c *chain) {
 	n.addConnection(c.id)
 
-	c.step = func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+	c.step = func(dest uint64, msg *orderer.ConsensusRequest) error {
 		n.connLock.RLock()
 		defer n.connLock.RUnlock()
 
@@ -2646,13 +2728,19 @@ func (n *network) addChain(c *chain) {
 		case <-n.connectivity[dest]:
 		case <-n.connectivity[c.id]:
 		default:
-			go n.chains[dest].Step(msg, c.id)
+			// get a reference of chain while
+			// n.chains is still RLock'ed
+			target := n.chains[dest]
+			go func() {
+				defer GinkgoRecover()
+				target.Consensus(msg, c.id)
+			}()
 		}
 
-		return nil, nil
+		return nil
 	}
 
-	c.rpc.StepStub = func(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error) {
+	c.rpc.SendConsensusStub = func(dest uint64, msg *orderer.ConsensusRequest) error {
 		c.stepLock.RLock()
 		defer c.stepLock.RUnlock()
 		return c.step(dest, msg)
@@ -2666,7 +2754,13 @@ func (n *network) addChain(c *chain) {
 		case <-n.connectivity[dest]:
 		case <-n.connectivity[c.id]:
 		default:
-			go n.chains[dest].Submit(msg, c.id)
+			// get a reference of chain while
+			// n.chains is still RLock'ed
+			target := n.chains[dest]
+			go func() {
+				defer GinkgoRecover()
+				target.Submit(msg, c.id)
+			}()
 		}
 
 		return nil
@@ -2716,35 +2810,27 @@ func (n *network) start(ids ...uint64) {
 		}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(len(nodes))
-	for _, i := range nodes {
-		go func(id uint64) {
-			defer GinkgoRecover()
-			n.chains[id].Start()
-			n.chains[id].unstarted = nil
+	for _, id := range nodes {
+		n.chains[id].start()
 
-			// When the Raft node bootstraps, it produces a ConfChange
-			// to add itself, which needs to be consumed with Ready().
-			// If there are pending configuration changes in raft,
-			// it refused to campaign, no matter how many ticks supplied.
-			// This is not a problem in production code because eventually
-			// raft.Ready will be consumed as real time goes by.
-			//
-			// However, this is problematic when using fake clock and artificial
-			// ticks. Instead of ticking raft indefinitely until raft.Ready is
-			// consumed, this check is added to indirectly guarantee
-			// that first ConfChange is actually consumed and we can safely
-			// proceed to tick raft.
-			Eventually(func() error {
-				_, err := n.chains[id].storage.Entries(1, 1, 1)
-				return err
-			}).ShouldNot(HaveOccurred())
-			Eventually(n.chains[id].WaitReady).ShouldNot(HaveOccurred())
-			wg.Done()
-		}(i)
+		// When the Raft node bootstraps, it produces a ConfChange
+		// to add itself, which needs to be consumed with Ready().
+		// If there are pending configuration changes in raft,
+		// it refused to campaign, no matter how many ticks supplied.
+		// This is not a problem in production code because eventually
+		// raft.Ready will be consumed as real time goes by.
+		//
+		// However, this is problematic when using fake clock and artificial
+		// ticks. Instead of ticking raft indefinitely until raft.Ready is
+		// consumed, this check is added to indirectly guarantee
+		// that first ConfChange is actually consumed and we can safely
+		// proceed to tick raft.
+		Eventually(func() error {
+			_, err := n.chains[id].storage.Entries(1, 1, 1)
+			return err
+		}, LongEventualTimeout).ShouldNot(HaveOccurred())
+		Eventually(n.chains[id].WaitReady, LongEventualTimeout).ShouldNot(HaveOccurred())
 	}
-	wg.Wait()
 }
 
 func (n *network) stop(ids ...uint64) {
@@ -2758,7 +2844,7 @@ func (n *network) stop(ids ...uint64) {
 	for _, id := range nodes {
 		c := n.chains[id]
 		c.Halt()
-		<-c.Errored()
+		Eventually(c.Errored).Should(BeClosed())
 		select {
 		case <-c.stopped:
 		default:
@@ -2781,57 +2867,60 @@ func (n *network) exec(f func(c *chain), ids ...uint64) {
 	}
 }
 
-// connect a node to network and tick on leader to trigger
+// connect a node to network and tick leader to trigger
 // a heartbeat so newly joined node can detect leader.
-func (n *network) rejoin(id uint64, wasLeader bool) {
+//
+// expectLeaderChange controls whether leader change should
+// be observed on newly joined node.
+// - it should be true if newly joined node was leader
+// - it should be false if newly joined node was follower, and
+//   already knows the leader.
+func (n *network) join(id uint64, expectLeaderChange bool) {
 	n.connect(id)
-	n.chains[n.leader].clock.Increment(interval)
 
-	if wasLeader {
-		Eventually(n.chains[id].observe).Should(Receive(Equal(raft.SoftState{Lead: n.leader, RaftState: raft.StateFollower})))
-	} else {
-		Consistently(n.chains[id].observe).ShouldNot(Receive())
+	leader, follower := n.chains[n.leader], n.chains[id]
+	step := leader.getStepFunc()
+	signal := make(chan struct{})
+	leader.setStepFunc(func(dest uint64, msg *orderer.ConsensusRequest) error {
+		if dest == id {
+			// close signal channel when a message targeting newly
+			// joined node is observed on wire.
+			select {
+			case <-signal:
+			default:
+				close(signal)
+			}
+		}
+
+		return step(dest, msg)
+	})
+
+	leader.clock.Increment(interval)
+	Eventually(signal, LongEventualTimeout).Should(BeClosed())
+
+	leader.setStepFunc(step)
+
+	if expectLeaderChange {
+		Eventually(follower.observe, LongEventualTimeout).Should(Receive(Equal(raft.SoftState{Lead: n.leader, RaftState: raft.StateFollower})))
 	}
 
 	// wait for newly joined node to catch up with leader
 	i, err := n.chains[n.leader].opts.MemoryStorage.LastIndex()
 	Expect(err).NotTo(HaveOccurred())
-	Eventually(n.chains[id].opts.MemoryStorage.LastIndex).Should(Equal(i))
+	Eventually(n.chains[id].opts.MemoryStorage.LastIndex, LongEventualTimeout).Should(Equal(i))
 }
 
 // elect deterministically elects a node as leader
-// by only ticking timer on that node. It returns
-// the actual number of ticks in case test needs it.
-func (n *network) elect(id uint64) (tick int) {
-	// Also, due to the way fake clock is implemented,
-	// a slow consumer MAY skip a tick, which could
-	// results in undeterministic behavior. Therefore
-	// we are going to wait for enough time after each
-	// tick so it could take effect.
-	t := 10 * time.Millisecond
-
+func (n *network) elect(id uint64) {
 	n.connLock.RLock()
 	c := n.chains[id]
 	n.connLock.RUnlock()
 
-	var elected bool
-	for !elected {
-		c.clock.Increment(interval)
-		tick++
-
-		select {
-		case <-time.After(t):
-			// this tick does not trigger leader change within t, continue
-		case s := <-c.observe: // leadership change occurs
-			if s.RaftState == raft.StateLeader {
-				elected = true
-				break
-			}
-		}
-	}
+	// Send node an artificial MsgTimeoutNow to emulate leadership transfer.
+	c.Consensus(&orderer.ConsensusRequest{Payload: utils.MarshalOrPanic(&raftpb.Message{Type: raftpb.MsgTimeoutNow})}, 0)
+	Eventually(c.observe, LongEventualTimeout).Should(Receive(StateEqual(id, raft.StateLeader)))
 
 	// now observe leader change on other nodes
-
 	n.connLock.RLock()
 	for _, c := range n.chains {
 		if c.id == id {
@@ -2843,13 +2932,12 @@ func (n *network) elect(id uint64) (tick int) {
 		case <-n.connectivity[c.id]: // skip check if node n is disconnected
 		case <-c.unstarted: // skip check if node is not started yet
 		default:
-			Eventually(c.observe).Should(Receive(Equal(raft.SoftState{Lead: id, RaftState: raft.StateFollower})))
+			Eventually(c.observe, LongEventualTimeout).Should(Receive(StateEqual(id, raft.StateFollower)))
 		}
 	}
 	n.connLock.RUnlock()
 
 	n.leader = id
-	return tick
 }
 
 func (n *network) disconnect(i uint64) {
@@ -2913,4 +3001,8 @@ func getSeedBlock() *common.Block {
 		Data:     &common.BlockData{Data: [][]byte{[]byte("foo")}},
 		Metadata: &common.BlockMetadata{Metadata: make([][]byte, 4)},
 	}
+}
+
+func StateEqual(lead uint64, state raft.StateType) types.GomegaMatcher {
+	return Equal(raft.SoftState{Lead: lead, RaftState: state})
 }

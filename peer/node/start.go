@@ -56,7 +56,6 @@ import (
 	endorsement3 "github.com/hyperledger/fabric/core/handlers/endorsement/api/identities"
 	"github.com/hyperledger/fabric/core/handlers/library"
 	validation "github.com/hyperledger/fabric/core/handlers/validation/api"
-	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/cceventmgmt"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/operations"
@@ -156,8 +155,6 @@ func serve(args []string) error {
 		&car.Platform{},
 	)
 
-	deployedCCInfoProvider := &lscc.DeployedCCInfoProvider{}
-
 	identityDeserializerFactory := func(chainID string) msp.IdentityDeserializer {
 		return mgmt.GetManagerForChain(chainID)
 	}
@@ -174,17 +171,48 @@ func serve(args []string) error {
 	flogging.Global.SetObserver(logObserver)
 
 	membershipInfoProvider := privdata.NewMembershipInfoProvider(createSelfSignedData(), identityDeserializerFactory)
+
+	// TODO, unfortunately, the lifecycleImpl initialization is very unclean at the moment.
+	// This is because ccprovider.SetChaincodePath only works after ledgermgmt.Initialize,
+	// but ledgermgmt.Initialize requires a reference to lifecycle.  Finally,
+	// lscc requires a reference to the system chaincode provider in order to be created,
+	// which requires chaincode support to be up, which also requires, you guessed it, lifecycle.
+	// Once we remove the v1.0 lifecycle, we should be good to collapse all of the init
+	// of lifecycle to this point
+	lifecycleImpl := &lifecycle.Lifecycle{
+		LegacyDeployedCCInfoProvider: &lscc.DeployedCCInfoProvider{},
+		Serializer:                   &lifecycle.Serializer{},
+	}
+
 	//initialize resource management exit
 	ledgermgmt.Initialize(
 		&ledgermgmt.Initializer{
 			CustomTxProcessors:            peer.ConfigTxProcessors,
 			PlatformRegistry:              pr,
-			DeployedChaincodeInfoProvider: deployedCCInfoProvider,
+			DeployedChaincodeInfoProvider: lifecycleImpl,
 			MembershipInfoProvider:        membershipInfoProvider,
 			MetricsProvider:               metricsProvider,
 			HealthCheckRegistry:           opsSystem,
 		},
 	)
+
+	// Configure CC package storage
+	chaincodeInstallPath := ccprovider.GetChaincodeInstallPathFromViper()
+	ccprovider.SetChaincodesPath(chaincodeInstallPath)
+
+	ccPackageParser := &persistence.ChaincodePackageParser{}
+	ccStore := &persistence.Store{
+		Path:       chaincodeInstallPath,
+		ReadWriter: &persistence.FilesystemIO{},
+	}
+
+	packageProvider := &persistence.PackageProvider{
+		LegacyPP: &ccprovider.CCInfoFSImpl{},
+		Store:    ccStore,
+	}
+
+	lifecycleImpl.ChaincodeStore = ccStore
+	lifecycleImpl.PackageParser = ccPackageParser
 
 	// Parameter overrides must be processed before any parameters are
 	// cached. Failures to cache cause the server to terminate immediately.
@@ -261,9 +289,118 @@ func serve(args []string) error {
 	abServer := peer.NewDeliverEventsServer(mutualTLS, policyCheckerProvider, &peer.DeliverChainManager{}, metricsProvider)
 	pb.RegisterDeliverServer(peerServer.Server(), abServer)
 
-	// Initialize chaincode service
-	chaincodeSupport, ccp, sccp, packageProvider, lsccInst := startChaincodeServer(peerHost, aclProvider, pr, opsSystem, deployedCCInfoProvider)
+	// Create a self-signed CA for chaincode service
+	ca, err := tlsgen.NewCA()
+	if err != nil {
+		logger.Panic("Failed creating authentication layer:", err)
+	}
+	ccSrv, ccEndpoint, err := createChaincodeServer(ca, peerHost)
+	if err != nil {
+		logger.Panicf("Failed to create chaincode server: %s", err)
+	}
 
+	//get user mode
+	userRunsCC := chaincode.IsDevMode()
+	tlsEnabled := viper.GetBool("peer.tls.enabled")
+
+	// create chaincode specific tls CA
+	authenticator := accesscontrol.NewAuthenticator(ca)
+	ipRegistry := inproccontroller.NewRegistry()
+
+	sccp := scc.NewProvider(peer.Default, peer.DefaultSupport, ipRegistry)
+	lsccInst := lscc.New(sccp, aclProvider, pr)
+
+	lifecycleImpl.LegacyImpl = lsccInst
+
+	mspID := viper.GetString("peer.localMspId")
+
+	lifecycleSCC := &lifecycle.SCC{
+		Dispatcher: &dispatcher.Dispatcher{
+			Protobuf: &dispatcher.ProtobufImpl{},
+		},
+		Functions:           lifecycleImpl,
+		OrgMSPID:            mspID,
+		ChannelConfigSource: peer.Default,
+	}
+
+	dockerProvider := dockercontroller.NewProvider(
+		viper.GetString("peer.id"),
+		viper.GetString("peer.networkId"),
+		opsSystem.Provider,
+	)
+	dockerVM := dockercontroller.NewDockerVM(
+		dockerProvider.PeerID,
+		dockerProvider.NetworkID,
+		dockerProvider.BuildMetrics,
+	)
+
+	err = opsSystem.RegisterChecker("docker", dockerVM)
+	if err != nil {
+		logger.Panicf("failed to register docker health check: %s", err)
+	}
+
+	chaincodeSupport := chaincode.NewChaincodeSupport(
+		chaincode.GlobalConfig(),
+		ccEndpoint,
+		userRunsCC,
+		ca.CertBytes(),
+		authenticator,
+		packageProvider,
+		lifecycleImpl,
+		aclProvider,
+		container.NewVMController(
+			map[string]container.VMProvider{
+				dockercontroller.ContainerType: dockerProvider,
+				inproccontroller.ContainerType: ipRegistry,
+			},
+		),
+		sccp,
+		pr,
+		peer.DefaultSupport,
+		opsSystem.Provider,
+		lifecycleImpl,
+	)
+	ipRegistry.ChaincodeSupport = chaincodeSupport
+	ccp := chaincode.NewProvider(chaincodeSupport)
+
+	ccSupSrv := pb.ChaincodeSupportServer(chaincodeSupport)
+	if tlsEnabled {
+		ccSupSrv = authenticator.Wrap(ccSupSrv)
+	}
+
+	csccInst := cscc.New(ccp, sccp, aclProvider, lifecycleImpl, lsccInst)
+	qsccInst := qscc.New(aclProvider)
+
+	//Now that chaincode is initialized, register all system chaincodes.
+	sccs := scc.CreatePluginSysCCs(sccp)
+	for _, cc := range append([]scc.SelfDescribingSysCC{lsccInst, csccInst, qsccInst, lifecycleSCC}, sccs...) {
+		sccp.RegisterSysCC(cc)
+	}
+	pb.RegisterChaincodeSupportServer(ccSrv.Server(), ccSupSrv)
+
+	// start the chaincode specific gRPC listening service
+	go ccSrv.Start()
+
+	// register HealthChecker
+	certPair, err := ca.NewClientCertKeyPair()
+	if err != nil {
+		logger.Panicf("Failed to create key pair for health checker: %s", err)
+	}
+	clientConfig := comm.ClientConfig{
+		SecOpts: &comm.SecureOptions{
+			UseTLS:            ccSrv.TLSEnabled(),
+			RequireClientCert: ccSrv.MutualTLSRequired(),
+			Certificate:       certPair.Cert,
+			Key:               certPair.Key,
+			ServerRootCAs:     [][]byte{ca.CertBytes()},
+		},
+		Timeout: 10 * time.Second,
+	}
+	hcc, err := comm.NewHealthCheckClient(clientConfig, ccEndpoint, "")
+	if err != nil {
+		logger.Panicf("Failed to create health checker: %s", err)
+	}
+	opsSystem.RegisterChecker("chaincodeServer", hcc)
 	logger.Debugf("Running peer")
 
 	// Start the Admin server
@@ -356,7 +493,7 @@ func serve(args []string) error {
 		}
 		cceventmgmt.GetMgr().Register(cid, sub)
 	}, ccp, sccp, plugin.MapBasedMapper(validationPluginsByName),
-		pr, deployedCCInfoProvider, membershipInfoProvider, metricsProvider, lsccInst)
+		pr, lifecycleImpl, membershipInfoProvider, metricsProvider, lsccInst)
 
 	if viper.GetBool("peer.discovery.enabled") {
 		registerDiscoveryService(peerServer, policyMgr, lifecycle)
@@ -618,172 +755,6 @@ func computeChaincodeEndpoint(peerHostname string) (ccEndpoint string, err error
 
 	logger.Infof("Exit with ccEndpoint: %s", ccEndpoint)
 	return ccEndpoint, nil
-}
-
-//NOTE - when we implement JOIN we will no longer pass the chainID as param
-//The chaincode support will come up without registering system chaincodes
-//which will be registered only during join phase.
-func registerChaincodeSupport(
-	grpcServer *comm.GRPCServer,
-	ccEndpoint string,
-	ca tlsgen.CA,
-	packageProvider *persistence.PackageProvider,
-	aclProvider aclmgmt.ACLProvider,
-	pr *platforms.Registry,
-	lifecycleSCC *lifecycle.SCC,
-	ops *operations.System,
-	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
-) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider, *lscc.LifeCycleSysCC) {
-	//get user mode
-	userRunsCC := chaincode.IsDevMode()
-	tlsEnabled := viper.GetBool("peer.tls.enabled")
-
-	authenticator := accesscontrol.NewAuthenticator(ca)
-	ipRegistry := inproccontroller.NewRegistry()
-
-	sccp := scc.NewProvider(peer.Default, peer.DefaultSupport, ipRegistry)
-	lsccInst := lscc.New(sccp, aclProvider, pr)
-
-	dockerProvider := dockercontroller.NewProvider(
-		viper.GetString("peer.id"),
-		viper.GetString("peer.networkId"),
-		ops.Provider,
-	)
-	dockerVM := dockercontroller.NewDockerVM(
-		dockerProvider.PeerID,
-		dockerProvider.NetworkID,
-		dockerProvider.BuildMetrics,
-	)
-
-	err := ops.RegisterChecker("docker", dockerVM)
-	if err != nil {
-		logger.Panicf("failed to register docker health check: %s", err)
-	}
-
-	chaincodeSupport := chaincode.NewChaincodeSupport(
-		chaincode.GlobalConfig(),
-		ccEndpoint,
-		userRunsCC,
-		ca.CertBytes(),
-		authenticator,
-		packageProvider,
-		lsccInst,
-		aclProvider,
-		container.NewVMController(
-			map[string]container.VMProvider{
-				dockercontroller.ContainerType: dockerProvider,
-				inproccontroller.ContainerType: ipRegistry,
-			},
-		),
-		sccp,
-		pr,
-		peer.DefaultSupport,
-		ops.Provider,
-		deployedCCInfoProvider,
-	)
-	ipRegistry.ChaincodeSupport = chaincodeSupport
-	ccp := chaincode.NewProvider(chaincodeSupport)
-
-	ccSrv := pb.ChaincodeSupportServer(chaincodeSupport)
-	if tlsEnabled {
-		ccSrv = authenticator.Wrap(ccSrv)
-	}
-
-	csccInst := cscc.New(ccp, sccp, aclProvider, deployedCCInfoProvider, lsccInst)
-	qsccInst := qscc.New(aclProvider)
-
-	//Now that chaincode is initialized, register all system chaincodes.
-	sccs := scc.CreatePluginSysCCs(sccp)
-	for _, cc := range append([]scc.SelfDescribingSysCC{lsccInst, csccInst, qsccInst, lifecycleSCC}, sccs...) {
-		sccp.RegisterSysCC(cc)
-	}
-	pb.RegisterChaincodeSupportServer(grpcServer.Server(), ccSrv)
-
-	return chaincodeSupport, ccp, sccp, lsccInst
-}
-
-// startChaincodeServer will finish chaincode related initialization, including:
-// 1) setup local chaincode install path
-// 2) create chaincode specific tls CA
-// 3) start the chaincode specific gRPC listening service
-func startChaincodeServer(
-	peerHost string,
-	aclProvider aclmgmt.ACLProvider,
-	pr *platforms.Registry,
-	ops *operations.System,
-	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
-) (*chaincode.ChaincodeSupport, ccprovider.ChaincodeProvider, *scc.Provider, *persistence.PackageProvider, *lscc.LifeCycleSysCC) {
-	// Setup chaincode path
-	chaincodeInstallPath := ccprovider.GetChaincodeInstallPathFromViper()
-	ccprovider.SetChaincodesPath(chaincodeInstallPath)
-
-	ccPackageParser := &persistence.ChaincodePackageParser{}
-	ccStore := &persistence.Store{
-		Path:       chaincodeInstallPath,
-		ReadWriter: &persistence.FilesystemIO{},
-	}
-
-	packageProvider := &persistence.PackageProvider{
-		LegacyPP: &ccprovider.CCInfoFSImpl{},
-		Store:    ccStore,
-	}
-
-	mspID := viper.GetString("peer.localMspId")
-
-	lifecycleSCC := &lifecycle.SCC{
-		Dispatcher: &dispatcher.Dispatcher{
-			Protobuf: &dispatcher.ProtobufImpl{},
-		},
-		Functions: &lifecycle.Lifecycle{
-			PackageParser:  ccPackageParser,
-			ChaincodeStore: ccStore,
-		},
-		OrgMSPID: mspID,
-	}
-
-	// Create a self-signed CA for chaincode service
-	ca, err := tlsgen.NewCA()
-	if err != nil {
-		logger.Panic("Failed creating authentication layer:", err)
-	}
-	ccSrv, ccEndpoint, err := createChaincodeServer(ca, peerHost)
-	if err != nil {
-		logger.Panicf("Failed to create chaincode server: %s", err)
-	}
-	chaincodeSupport, ccp, sccp, lsccInst := registerChaincodeSupport(
-		ccSrv,
-		ccEndpoint,
-		ca,
-		packageProvider,
-		aclProvider,
-		pr,
-		lifecycleSCC,
-		ops,
-		deployedCCInfoProvider,
-	)
-	go ccSrv.Start()
-
-	// register HealthChecker
-	certPair, err := ca.NewClientCertKeyPair()
-	if err != nil {
-		logger.Panicf("Failed to create key pair for health checker: %s", err)
-	}
-	clientConfig := comm.ClientConfig{
-		SecOpts: &comm.SecureOptions{
-			UseTLS:            ccSrv.TLSEnabled(),
-			RequireClientCert: ccSrv.MutualTLSRequired(),
-			Certificate:       certPair.Cert,
-			Key:               certPair.Key,
-			ServerRootCAs:     [][]byte{ca.CertBytes()},
-		},
-		Timeout: 10 * time.Second,
-	}
-	hcc, err := comm.NewHealthCheckClient(clientConfig, ccEndpoint, "")
-	if err != nil {
-		logger.Panicf("Failed to create health checker: %s", err)
-	}
-	ops.RegisterChecker("chaincodeServer", hcc)
-	return chaincodeSupport, ccp, sccp, packageProvider, lsccInst
 }
 
 func adminHasSeparateListener(peerListenAddr string, adminListenAddress string) bool {

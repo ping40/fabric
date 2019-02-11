@@ -11,15 +11,28 @@ import (
 	"fmt"
 
 	"github.com/hyperledger/fabric/common/chaincode"
+	corechaincode "github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/chaincode/persistence"
+	"github.com/hyperledger/fabric/core/ledger"
+	cb "github.com/hyperledger/fabric/protos/common"
+
+	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
 )
 
-// NamespacesName is the prefix (or namespace) of the DB which will be used to store
-// the information about other namespaces (for things like chaincodes) in the DB.
-// We want a sub-namespaces within lifecycle in case other information needs to be stored here
-// in the future.
-const NamespacesName = "namespaces"
+const (
+	// NamespacesName is the prefix (or namespace) of the DB which will be used to store
+	// the information about other namespaces (for things like chaincodes) in the DB.
+	// We want a sub-namespaces within lifecycle in case other information needs to be stored here
+	// in the future.
+	NamespacesName = "namespaces"
+
+	// DefinedChaincodeType is the name of the type used to store defined chaincodes
+	DefinedChaincodeType = "DefinedChaincode"
+
+	// FriendlyDefinedChaincodeType is the name exposed to the outside world for the chaincode namespace
+	FriendlyDefinedChaincodeType = "Chaincode"
+)
 
 // Public/World DB layout looks like the following:
 // namespaces/metadata/<namespace> -> namespace metadata, including namespace type
@@ -63,16 +76,21 @@ type ChaincodeDefinition struct {
 
 // ChaincodeParameters are the parts of the chaincode definition which are serialized
 // as values in the statedb.
+// WARNING: This structure is serialized/deserialized from the DB, re-ordering or adding fields
+// will cause opaque checks to fail.
 type ChaincodeParameters struct {
 	Version             string
 	Hash                []byte
 	EndorsementPlugin   string
 	ValidationPlugin    string
 	ValidationParameter []byte
+	Collections         *cb.CollectionConfigPackage
 }
 
 // DefinedChaincode contains the chaincode parameters, as well as the sequence number of the definition.
 // Note, it does not embed ChaincodeParameters so as not to complicate the serialization.
+// WARNING: This structure is serialized/deserialized from the DB, re-ordering or adding fields
+// will cause opaque checks to fail.
 type DefinedChaincode struct {
 	Sequence            int64
 	Version             string
@@ -80,6 +98,7 @@ type DefinedChaincode struct {
 	EndorsementPlugin   string
 	ValidationPlugin    string
 	ValidationParameter []byte
+	Collections         *cb.CollectionConfigPackage
 }
 
 // ChaincodeStore provides a way to persist chaincodes
@@ -87,18 +106,32 @@ type ChaincodeStore interface {
 	Save(name, version string, ccInstallPkg []byte) (hash []byte, err error)
 	RetrieveHash(name, version string) (hash []byte, err error)
 	ListInstalledChaincodes() ([]chaincode.InstalledChaincode, error)
+	Load(hash []byte) (ccInstallPkg []byte, name, version string, err error)
 }
 
 type PackageParser interface {
 	Parse(data []byte) (*persistence.ChaincodePackage, error)
 }
 
+//go:generate counterfeiter -o mock/legacy_lifecycle.go --fake-name LegacyLifecycle . LegacyLifecycle
+type LegacyLifecycle interface {
+	corechaincode.Lifecycle
+}
+
+//go:generate counterfeiter -o mock/legacy_ccinfo.go --fake-name LegacyDeployedCCInfoProvider . LegacyDeployedCCInfoProvider
+type LegacyDeployedCCInfoProvider interface {
+	ledger.DeployedChaincodeInfoProvider
+}
+
 // Lifecycle implements the lifecycle operations which are invoked
 // by the SCC as well as internally
 type Lifecycle struct {
-	ChaincodeStore ChaincodeStore
-	PackageParser  PackageParser
-	Serializer     *Serializer
+	ChannelConfigSource          ChannelConfigSource
+	ChaincodeStore               ChaincodeStore
+	PackageParser                PackageParser
+	Serializer                   *Serializer
+	LegacyImpl                   LegacyLifecycle
+	LegacyDeployedCCInfoProvider LegacyDeployedCCInfoProvider
 }
 
 // DefineChaincode takes a chaincode definition, checks that its sequence number is the next allowable sequence number,
@@ -129,6 +162,7 @@ func (l *Lifecycle) DefineChaincode(cd *ChaincodeDefinition, publicState ReadWri
 		EndorsementPlugin:   cd.Parameters.EndorsementPlugin,
 		ValidationPlugin:    cd.Parameters.ValidationPlugin,
 		ValidationParameter: cd.Parameters.ValidationParameter,
+		Collections:         cd.Parameters.Collections,
 	}, publicState); err != nil {
 		return nil, errors.WithMessage(err, "could not serialize chaincode definition")
 	}
@@ -147,6 +181,10 @@ func (l *Lifecycle) DefineChaincodeForOrg(cd *ChaincodeDefinition, publicState R
 	}
 
 	requestedSequence := cd.Sequence
+
+	if currentSequence == requestedSequence && requestedSequence == 0 {
+		return errors.Errorf("requested sequence is 0, but first definable sequence number is 1")
+	}
 
 	if requestedSequence < currentSequence {
 		return errors.Errorf("currently defined sequence %d is larger than requested sequence %d", currentSequence, requestedSequence)
@@ -173,6 +211,11 @@ func (l *Lifecycle) DefineChaincodeForOrg(cd *ChaincodeDefinition, publicState R
 			return errors.Errorf("attempted to define the current sequence (%d) for namespace %s, but ValidationParameter '%x' != '%x'", currentSequence, cd.Name, definedChaincode.ValidationParameter, cd.Parameters.ValidationParameter)
 		case !bytes.Equal(definedChaincode.Hash, cd.Parameters.Hash):
 			return errors.Errorf("attempted to define the current sequence (%d) for namespace %s, but Hash '%x' != '%x'", currentSequence, cd.Name, definedChaincode.Hash, cd.Parameters.Hash)
+		case !proto.Equal(definedChaincode.Collections, cd.Parameters.Collections):
+			if proto.Equal(definedChaincode.Collections, &cb.CollectionConfigPackage{}) && cd.Parameters.Collections == nil {
+				break
+			}
+			return errors.Errorf("attempted to define the current sequence (%d) for namespace %s, but Collections do not match", currentSequence, cd.Name)
 		default:
 		}
 	}
@@ -183,6 +226,17 @@ func (l *Lifecycle) DefineChaincodeForOrg(cd *ChaincodeDefinition, publicState R
 	}
 
 	return nil
+}
+
+// QueryDefinedChaincode returns the defined chaincode by the given name (if it is defined, and a chaincode)
+// or otherwise returns an error.
+func (l *Lifecycle) QueryDefinedChaincode(name string, publicState ReadableState) (*DefinedChaincode, error) {
+	definedChaincode := &DefinedChaincode{}
+	if err := l.Serializer.Deserialize(NamespacesName, name, definedChaincode, publicState); err != nil {
+		return nil, errors.WithMessage(err, fmt.Sprintf("could not deserialize namespace %s as chaincode", name))
+	}
+
+	return definedChaincode, nil
 }
 
 // InstallChaincode installs a given chaincode to the peer's chaincode store.
@@ -200,6 +254,28 @@ func (l *Lifecycle) InstallChaincode(name, version string, chaincodeInstallPacka
 	}
 
 	return hash, nil
+}
+
+// QueryDefinedNamespaces lists the publicly defined namespaces in a channel.  Today it should only ever
+// find Datatype encodings of 'DefinedChaincode'.  In the future as we support encodings like 'TokenManagementSystem'
+// or similar, additional statements will be added to the switch.
+func (l *Lifecycle) QueryDefinedNamespaces(publicState RangeableState) (map[string]string, error) {
+	metadatas, err := l.Serializer.DeserializeAllMetadata(NamespacesName, publicState)
+	if err != nil {
+		return nil, errors.WithMessage(err, "could not query namespace metadata")
+	}
+
+	result := map[string]string{}
+	for key, value := range metadatas {
+		switch value.Datatype {
+		case DefinedChaincodeType:
+			result[key] = FriendlyDefinedChaincodeType
+		default:
+			// This should never execute, but seems preferable to returning an error
+			result[key] = value.Datatype
+		}
+	}
+	return result, nil
 }
 
 // QueryInstalledChaincode returns the hash of an installed chaincode of a given name and version.

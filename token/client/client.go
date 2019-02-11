@@ -29,7 +29,13 @@ type Prover interface {
 	// to be transfererd and the shares describing how they are going to be distributed
 	// among recipients; it returns a response in bytes and an error message in the case the
 	// request fails
-	RequestTransfer(tokenIDs [][]byte, shares []*token.RecipientTransferShare, signingIdentity tk.SigningIdentity) ([]byte, error)
+	RequestTransfer(tokenIDs []*token.TokenId, shares []*token.RecipientTransferShare, signingIdentity tk.SigningIdentity) ([]byte, error)
+
+	// RequestRedeem allows the redemption of the tokens in the input tokenIDs
+	// It queries the ledger to read detail for each token id.
+	// It creates a token transaction with an output for redeemed tokens and
+	// possibly another output to transfer the remaining tokens, if any, to the same user
+	RequestRedeem(tokenIDs []*token.TokenId, quantity uint64, signingIdentity tk.SigningIdentity) ([]byte, error)
 
 	// ListTokens allows the client to submit a list request to a prover peer service;
 	// it returns a list of TokenOutput and an error message in the case the request fails
@@ -124,8 +130,33 @@ func (c *Client) Issue(tokensToIssue []*token.TokenToIssue, waitTimeout time.Dur
 // If the status is SUCCESS (200), it means that the transaction has been successfully submitted regardless of the error.
 // In this case, check the transaction status to know if the transaction is committed or invalidated.
 // If the transaction is invalidated, the application can fix the error and call the function again.
-func (c *Client) Transfer(tokenIDs [][]byte, shares []*token.RecipientTransferShare, waitTimeout time.Duration) (*common.Envelope, string, *common.Status, bool, error) {
+func (c *Client) Transfer(tokenIDs []*token.TokenId, shares []*token.RecipientTransferShare, waitTimeout time.Duration) (*common.Envelope, string, *common.Status, bool, error) {
 	serializedTokenTx, err := c.Prover.RequestTransfer(tokenIDs, shares, c.SigningIdentity)
+	if err != nil {
+		return nil, "", nil, false, err
+	}
+
+	txEnvelope, txid, err := c.TxSubmitter.CreateTxEnvelope(serializedTokenTx)
+	if err != nil {
+		return nil, "", nil, false, err
+	}
+
+	ordererStatus, committed, err := c.TxSubmitter.Submit(txEnvelope, waitTimeout)
+	return txEnvelope, txid, ordererStatus, committed, err
+}
+
+// Redeem allows the redemption of the tokens in the input tokenIDs
+// The 'waitTimeout' parameter defines the time to wait for the transaction to be committed.
+// If it is 0, the function will return immediately after receiving a response from the orderer
+// without waiting for the transaction to be committed.
+// If it is greater than 0, the function will wait until the transaction commit event is received or wait timed out, whichever is earlier.
+// This API submits the transaction to the orderer and returns envelope, transaction id, orderer status, committed boolean, and error.
+// When an error is returned, check the orderer status.
+// If it is SUCCESS (200), the transaction has been successfully submitted regardless of the error.
+// The application must analyze the error and get the transaction status to make sure the transaction is either committed or invalidated.
+// If the transaction is invalidated, the application may call the API again after fixing the error.
+func (c *Client) Redeem(tokenIDs []*token.TokenId, quantity uint64, waitTimeout time.Duration) (*common.Envelope, string, *common.Status, bool, error) {
+	serializedTokenTx, err := c.Prover.RequestRedeem(tokenIDs, quantity, c.SigningIdentity)
 	if err != nil {
 		return nil, "", nil, false, err
 	}

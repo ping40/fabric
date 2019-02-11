@@ -49,6 +49,10 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 	)
 
 	BeforeEach(func() {
+		ordererRunners = nil
+		ordererProcesses = nil
+		peerProcesses = nil
+
 		var err error
 		testDir, err = ioutil.TempDir("", "e2e-etcfraft_reconfig")
 		Expect(err).NotTo(HaveOccurred())
@@ -345,7 +349,80 @@ var _ = Describe("EndToEnd reconfiguration and onboarding", func() {
 			}, orderers, peer, network)
 		})
 	})
+
+	When("an orderer node is evicted", func() {
+		It("it does not complain and does it obediently", func() {
+			network = nwo.New(nwo.MultiNodeEtcdRaft(), testDir, client, 33000, components)
+
+			o1, o2, o3 := network.Orderer("orderer1"), network.Orderer("orderer2"), network.Orderer("orderer3")
+			orderers := []*nwo.Orderer{o1, o2, o3}
+
+			peer = network.Peer("Org1", "peer1")
+
+			network.GenerateConfigTree()
+			network.Bootstrap()
+
+			By("Launching the orderers")
+			for _, o := range orderers {
+				runner := network.OrdererRunner(o)
+				ordererRunners = append(ordererRunners, runner)
+				process := ifrit.Invoke(runner)
+				ordererProcesses = append(ordererProcesses, process)
+			}
+
+			for _, ordererProc := range ordererProcesses {
+				Eventually(ordererProc.Ready()).Should(BeClosed())
+			}
+
+			By("Waiting for them to elect a leader")
+			evictedNode := findLeader(ordererRunners) - 1
+
+			By("Creating a channel")
+			network.CreateChannel("testchannel", network.Orderers[evictedNode], peer)
+
+			By("Waiting for the channel to be serviced")
+			assertBlockReception(map[string]int{
+				"testchannel": 0,
+			}, orderers, peer, network)
+
+			By("Removing the leader from both system channel and application channel")
+			certificatesOfOrderers := refreshOrdererPEMs(network)
+			for _, channelName := range []string{"systemchannel", "testchannel"} {
+				nwo.RemoveConsenter(network, peer, network.Orderers[(evictedNode+1)%3], channelName, certificatesOfOrderers[evictedNode].oldCert)
+
+				fmt.Fprintln(GinkgoWriter, "Ensuring the other orderers detect the eviction of the node on channel", channelName)
+				Eventually(ordererRunners[(evictedNode+1)%3].Err(), time.Minute, time.Second).Should(gbytes.Say("Deactivated node"))
+				Eventually(ordererRunners[(evictedNode+2)%3].Err(), time.Minute, time.Second).Should(gbytes.Say("Deactivated node"))
+
+				fmt.Fprintln(GinkgoWriter, "Ensuring the evicted orderer stops rafting on channel", channelName)
+				stopMSg := fmt.Sprintf("Raft node stopped channel=%s", channelName)
+				Eventually(ordererRunners[evictedNode].Err(), time.Minute, time.Second).Should(gbytes.Say(stopMSg))
+			}
+
+			By("Ensuring the evicted orderer now doesn't serve clients")
+			ensureEvicted(orderers[evictedNode], peer, network, "systemchannel")
+			ensureEvicted(orderers[evictedNode], peer, network, "testchannel")
+
+			By("Ensuring that all orderers don't log errors to the log")
+			assertNoErrorsAreLogged(ordererRunners)
+		})
+	})
 })
+
+func ensureEvicted(evictedOrderer *nwo.Orderer, submitter *nwo.Peer, network *nwo.Network, channel string) {
+	c := commands.ChannelFetch{
+		ChannelID:  channel,
+		Block:      "newest",
+		OutputFile: "/dev/null",
+		Orderer:    network.OrdererAddress(evictedOrderer, nwo.ListenPort),
+	}
+
+	sess, err := network.OrdererAdminSession(evictedOrderer, submitter, c)
+	Expect(err).NotTo(HaveOccurred())
+
+	Eventually(sess, network.EventuallyTimeout).Should(gexec.Exit())
+	Expect(sess.Err).To(gbytes.Say("SERVICE_UNAVAILABLE"))
+}
 
 var extendedCryptoConfig = `---
 OrdererOrgs:
@@ -463,7 +540,10 @@ func assertBlockReception(expectedHeightsPerChannel map[string]int, orderers []*
 		wg.Add(len(orderers))
 		for _, orderer := range orderers {
 			go func(orderer *nwo.Orderer) {
-				defer wg.Done()
+				defer func() {
+					GinkgoRecover()
+					wg.Done()
+				}()
 				waitForBlockReception(orderer, p, n, channelName, blockSeq)
 			}(orderer)
 		}
@@ -475,7 +555,10 @@ func assertBlockReception(expectedHeightsPerChannel map[string]int, orderers []*
 
 	for channelName, blockSeq := range expectedHeightsPerChannel {
 		go func(channelName string, blockSeq int) {
-			defer wg.Done()
+			defer func() {
+				GinkgoRecover()
+				wg.Done()
+			}()
 			assertReception(channelName, blockSeq)
 		}(channelName, blockSeq)
 	}
@@ -531,7 +614,10 @@ func assertNoErrorsAreLogged(ordererRunners []*ginkgomon.Runner) {
 
 	for _, runner := range ordererRunners {
 		go func(runner *ginkgomon.Runner) {
-			defer wg.Done()
+			defer func() {
+				GinkgoRecover()
+				wg.Done()
+			}()
 			assertNoErrors(runner)
 		}(runner)
 	}
@@ -547,7 +633,10 @@ func deployChaincodes(n *nwo.Network, p *nwo.Peer, o *nwo.Orderer, mycc nwo.Chai
 		"testchannel3": mycc3,
 	} {
 		go func(channel string, cc nwo.Chaincode) {
-			defer wg.Done()
+			defer func() {
+				GinkgoRecover()
+				wg.Done()
+			}()
 			nwo.DeployChaincode(n, channel, o, cc, p)
 		}(channel, chaincode)
 	}

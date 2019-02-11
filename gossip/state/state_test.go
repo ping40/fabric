@@ -369,7 +369,7 @@ func newPeerNodeWithGossip(config *gossip.Config, committer committer.Committer,
 // Constructing pseudo peer node, simulating only gossip and state transfer part
 func newPeerNodeWithGossipWithValidatorWithMetrics(config *gossip.Config, committer committer.Committer,
 	acceptor peerIdentityAcceptor, g gossip.Gossip, v txvalidator.Validator,
-	stateMetrics *metrics.StateMetrics) *peerNode {
+	gossipMetrics *metrics.GossipMetrics) *peerNode {
 	cs := &cryptoServiceMock{acceptor: acceptor}
 	// Gossip component based on configuration provided and communication module
 	if g == nil {
@@ -386,8 +386,8 @@ func newPeerNodeWithGossipWithValidatorWithMetrics(config *gossip.Config, commit
 		Validator:      v,
 		TransientStore: &mockTransientStore{},
 		Committer:      committer,
-	}, pcomm.SignedData{})
-	sp := NewGossipStateProvider(util.GetTestChainID(), servicesAdapater, coord, stateMetrics)
+	}, pcomm.SignedData{}, gossipMetrics.PrivdataMetrics)
+	sp := NewGossipStateProvider(util.GetTestChainID(), servicesAdapater, coord, gossipMetrics.StateMetrics)
 	if sp == nil {
 		return nil
 	}
@@ -403,16 +403,16 @@ func newPeerNodeWithGossipWithValidatorWithMetrics(config *gossip.Config, commit
 
 // add metrics provider for metrics testing
 func newPeerNodeWithGossipWithMetrics(config *gossip.Config, committer committer.Committer,
-	acceptor peerIdentityAcceptor, g gossip.Gossip, stateMetrics *metrics.StateMetrics) *peerNode {
+	acceptor peerIdentityAcceptor, g gossip.Gossip, gossipMetrics *metrics.GossipMetrics) *peerNode {
 	return newPeerNodeWithGossipWithValidatorWithMetrics(config, committer, acceptor, g,
-		&validator.MockValidator{}, stateMetrics)
+		&validator.MockValidator{}, gossipMetrics)
 }
 
 // Constructing pseudo peer node, simulating only gossip and state transfer part
 func newPeerNodeWithGossipWithValidator(config *gossip.Config, committer committer.Committer,
 	acceptor peerIdentityAcceptor, g gossip.Gossip, v txvalidator.Validator) *peerNode {
-	stateMetrics := metrics.NewGossipMetrics(&disabled.Provider{}).StateMetrics
-	return newPeerNodeWithGossipWithValidatorWithMetrics(config, committer, acceptor, g, v, stateMetrics)
+	gossipMetrics := metrics.NewGossipMetrics(&disabled.Provider{})
+	return newPeerNodeWithGossipWithValidatorWithMetrics(config, committer, acceptor, g, v, gossipMetrics)
 }
 
 // Constructing pseudo peer node, simulating only gossip and state transfer part
@@ -1662,6 +1662,29 @@ func TestTransferOfPvtDataBetweenPeers(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fail()
 	}
+}
+
+func TestStateRequestValidator(t *testing.T) {
+	validator := &stateRequestValidator{}
+	err := validator.validate(&proto.RemoteStateRequest{
+		StartSeqNum: 10,
+		EndSeqNum:   5,
+	})
+	assert.Contains(t, err.Error(), "Invalid sequence interval [10...5).")
+	assert.Error(t, err)
+
+	err = validator.validate(&proto.RemoteStateRequest{
+		StartSeqNum: 10,
+		EndSeqNum:   30,
+	})
+	assert.Contains(t, err.Error(), "Requesting blocks range [10-30) greater than configured")
+	assert.Error(t, err)
+
+	err = validator.validate(&proto.RemoteStateRequest{
+		StartSeqNum: 10,
+		EndSeqNum:   20,
+	})
+	assert.NoError(t, err)
 }
 
 func waitUntilTrueOrTimeout(t *testing.T, predicate func() bool, timeout time.Duration) {

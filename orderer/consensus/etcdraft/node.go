@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package etcdraft
 
 import (
+	"sync"
 	"time"
 
 	"code.cloudfoundry.org/clock"
@@ -21,6 +22,9 @@ import (
 type node struct {
 	chainID string
 	logger  *flogging.FabricLogger
+
+	unreachableLock sync.RWMutex
+	unreachable     map[uint64]struct{}
 
 	storage *RaftStorage
 	config  *raft.Config
@@ -96,6 +100,9 @@ func (n *node) run() {
 }
 
 func (n *node) send(msgs []raftpb.Message) {
+	n.unreachableLock.RLock()
+	defer n.unreachableLock.RUnlock()
+
 	for _, msg := range msgs {
 		if msg.To == 0 {
 			continue
@@ -104,12 +111,15 @@ func (n *node) send(msgs []raftpb.Message) {
 		status := raft.SnapshotFinish
 
 		msgBytes := utils.MarshalOrPanic(&msg)
-		_, err := n.rpc.Step(msg.To, &orderer.StepRequest{Channel: n.chainID, Payload: msgBytes})
+		err := n.rpc.SendConsensus(msg.To, &orderer.ConsensusRequest{Channel: n.chainID, Payload: msgBytes})
 		if err != nil {
 			// TODO We should call ReportUnreachable if message delivery fails
-			n.logger.Errorf("Failed to send StepRequest to %d, because: %s", msg.To, err)
+			n.logSendFailure(msg.To, err)
 
 			status = raft.SnapshotFailure
+		} else if _, ok := n.unreachable[msg.To]; ok {
+			n.logger.Infof("Successfully sent StepRequest to %d after failed attempt(s)", msg.To)
+			delete(n.unreachable, msg.To)
 		}
 
 		if msg.Type == raftpb.MsgSnap {
@@ -118,9 +128,19 @@ func (n *node) send(msgs []raftpb.Message) {
 	}
 }
 
-func (n *node) takeSnapshot(index uint64, cs *raftpb.ConfState, data []byte) {
+func (n *node) logSendFailure(dest uint64, err error) {
+	if _, ok := n.unreachable[dest]; ok {
+		n.logger.Debugf("Failed to send StepRequest to %d, because: %s", dest, err)
+		return
+	}
+
+	n.logger.Errorf("Failed to send StepRequest to %d, because: %s", dest, err)
+	n.unreachable[dest] = struct{}{}
+}
+
+func (n *node) takeSnapshot(index uint64, cs raftpb.ConfState, data []byte) {
 	if err := n.storage.TakeSnapshot(index, cs, data); err != nil {
-		n.logger.Panicf("Failed to create snapshot at index %d: %s", index, err)
+		n.logger.Errorf("Failed to create snapshot at index %d: %s", index, err)
 	}
 }
 

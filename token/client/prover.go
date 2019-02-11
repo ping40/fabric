@@ -101,19 +101,35 @@ func (prover *ProverPeer) RequestImport(tokensToIssue []*token.TokenToIssue, sig
 
 // RequestTransfer allows the client to submit a transfer request to a prover peer service;
 // the function takes as parameters a fabtoken application credential, the identifiers of the tokens
-// to be transfererd and the shares describing how they are going to be distributed
+// to be transferred and the shares describing how they are going to be distributed
 // among recipients; it returns a marshalled token transaction and an error message in the case the
 // request fails
-func (prover *ProverPeer) RequestTransfer(
-	tokenIDs [][]byte,
-	shares []*token.RecipientTransferShare,
-	signingIdentity tk.SigningIdentity) ([]byte, error) {
+func (prover *ProverPeer) RequestTransfer(tokenIDs []*token.TokenId, shares []*token.RecipientTransferShare, signingIdentity tk.SigningIdentity) ([]byte, error) {
 
 	tr := &token.TransferRequest{
 		Shares:   shares,
 		TokenIds: tokenIDs,
 	}
 	payload := &token.Command_TransferRequest{TransferRequest: tr}
+
+	sc, err := prover.CreateSignedCommand(payload, signingIdentity)
+	if err != nil {
+		return nil, err
+	}
+
+	return prover.SendCommand(context.Background(), sc)
+}
+
+// RequestRedeem allows the redemption of the tokens in the input tokenIDs
+// It queries the ledger to read detail for each token id.
+// It creates a token transaction with an output for redeemed tokens and
+// possibly another output to transfer the remaining tokens, if any, to the same user
+func (prover *ProverPeer) RequestRedeem(tokenIDs []*token.TokenId, quantity uint64, signingIdentity tk.SigningIdentity) ([]byte, error) {
+	rr := &token.RedeemRequest{
+		QuantityToRedeem: quantity,
+		TokenIds:         tokenIDs,
+	}
+	payload := &token.Command_RedeemRequest{RedeemRequest: rr}
 
 	sc, err := prover.CreateSignedCommand(payload, signingIdentity)
 	if err != nil {
@@ -240,6 +256,8 @@ func (prover *ProverPeer) CreateSignedCommand(payload interface{}, signingIdenti
 func commandFromPayload(payload interface{}) (*token.Command, error) {
 	switch t := payload.(type) {
 	case *token.Command_ImportRequest:
+		return &token.Command{Payload: t}, nil
+	case *token.Command_RedeemRequest:
 		return &token.Command{Payload: t}, nil
 	case *token.Command_TransferRequest:
 		return &token.Command{Payload: t}, nil

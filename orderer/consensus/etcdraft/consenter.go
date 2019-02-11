@@ -75,7 +75,7 @@ type Consenter struct {
 // Returns an empty string on failure.
 func (c *Consenter) TargetChannel(message proto.Message) string {
 	switch req := message.(type) {
-	case *orderer.StepRequest:
+	case *orderer.ConsensusRequest:
 		return req.Channel
 	case *orderer.SubmitRequest:
 		return req.Channel
@@ -144,11 +144,6 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 		return &inactive.Chain{Err: errors.Errorf("channel %s is not serviced by me", support.ChainID())}, nil
 	}
 
-	bp, err := newBlockPuller(support, c.Dialer, c.OrdererConfig.General.Cluster)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
 	opts := Options{
 		RaftID:        id,
 		Clock:         clock.NewClock(),
@@ -169,11 +164,20 @@ func (c *Consenter) HandleChain(support consensus.ConsenterSupport, metadata *co
 	}
 
 	rpc := &cluster.RPC{
-		Channel:             support.ChainID(),
-		Comm:                c.Communication,
-		DestinationToStream: make(map[uint64]orderer.Cluster_SubmitClient),
+		Timeout:       c.OrdererConfig.General.Cluster.RPCTimeout,
+		Logger:        c.Logger,
+		Channel:       support.ChainID(),
+		Comm:          c.Communication,
+		StreamsByType: cluster.NewStreamsByType(),
 	}
-	return NewChain(support, opts, c.Communication, rpc, bp, nil)
+	return NewChain(
+		support,
+		opts,
+		c.Communication,
+		rpc,
+		func() (BlockPuller, error) { return newBlockPuller(support, c.Dialer, c.OrdererConfig.General.Cluster) },
+		nil,
+	)
 }
 
 // ReadRaftMetadata attempts to read raft metadata from block metadata, if available.
@@ -230,7 +234,7 @@ func New(
 		ChainSelector: consenter,
 	}
 
-	comm := createComm(clusterDialer, conf, consenter)
+	comm := createComm(clusterDialer, consenter, conf.General.Cluster.SendBufferSize)
 	consenter.Communication = comm
 	svc := &cluster.Service{
 		StepLogger: flogging.MustGetLogger("orderer.common.cluster.step"),
@@ -241,16 +245,14 @@ func New(
 	return consenter
 }
 
-func createComm(clusterDialer *cluster.PredicateDialer,
-	conf *localconfig.TopLevel,
-	c *Consenter) *cluster.Comm {
+func createComm(clusterDialer *cluster.PredicateDialer, c *Consenter, sendBuffSize int) *cluster.Comm {
 	comm := &cluster.Comm{
-		Logger:       flogging.MustGetLogger("orderer.common.cluster"),
-		Chan2Members: make(map[string]cluster.MemberMapping),
-		Connections:  cluster.NewConnectionStore(clusterDialer),
-		RPCTimeout:   conf.General.Cluster.RPCTimeout,
-		ChanExt:      c,
-		H:            c,
+		SendBufferSize: sendBuffSize,
+		Logger:         flogging.MustGetLogger("orderer.common.cluster"),
+		Chan2Members:   make(map[string]cluster.MemberMapping),
+		Connections:    cluster.NewConnectionStore(clusterDialer),
+		ChanExt:        c,
+		H:              c,
 	}
 	c.Communication = comm
 	return comm

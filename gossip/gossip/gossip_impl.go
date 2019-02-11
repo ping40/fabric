@@ -9,6 +9,7 @@ package gossip
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -188,7 +189,7 @@ func (g *gossipServiceImpl) toDie() bool {
 
 func (g *gossipServiceImpl) JoinChan(joinMsg api.JoinChannelMessage, chainID common.ChainID) {
 	// joinMsg is supposed to have been already verified
-	g.chanState.joinChannel(joinMsg, chainID)
+	g.chanState.joinChannel(joinMsg, chainID, g.gossipMetrics.MembershipMetrics)
 
 	g.logger.Info("Joining gossip network of channel", string(chainID), "with", len(joinMsg.Members()), "organizations")
 	for _, org := range joinMsg.Members() {
@@ -226,7 +227,7 @@ func (g *gossipServiceImpl) learnAnchorPeers(channel string, orgOfAnchorPeers ap
 			g.logger.Warning("Got invalid port (0), skipping connecting to anchor peer", ap)
 			continue
 		}
-		endpoint := fmt.Sprintf("%s:%d", ap.Host, ap.Port)
+		endpoint := net.JoinHostPort(ap.Host, fmt.Sprintf("%d", ap.Port))
 		// Skip connecting to self
 		if g.selfNetworkMember().Endpoint == endpoint || g.selfNetworkMember().InternalEndpoint == endpoint {
 			g.logger.Info("Anchor peer with same endpoint, skipping connecting to myself")
@@ -241,8 +242,7 @@ func (g *gossipServiceImpl) learnAnchorPeers(channel string, orgOfAnchorPeers ap
 		identifier := func() (*discovery.PeerIdentification, error) {
 			remotePeerIdentity, err := g.comm.Handshake(&comm.RemotePeer{Endpoint: endpoint})
 			if err != nil {
-				err = errors.WithStack(err)
-				g.logger.Warningf("Deep probe of %s failed: %+v", endpoint, err)
+				g.logger.Warningf("Deep probe of %s failed: %s", endpoint, err)
 				return nil, err
 			}
 			isAnchorPeerInMyOrg := bytes.Equal(g.selfOrg, g.secAdvisor.OrgByPeerIdentity(remotePeerIdentity))

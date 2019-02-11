@@ -215,7 +215,7 @@ var _ = Describe("TokenClient", func() {
 
 	Describe("RequestTransfer", func() {
 		var (
-			tokenIDs          [][]byte
+			tokenIDs          []*token.TokenId
 			transferShares    []*token.RecipientTransferShare
 			marshalledCommand []byte
 			signedCommand     *token.SignedCommand
@@ -223,7 +223,10 @@ var _ = Describe("TokenClient", func() {
 
 		BeforeEach(func() {
 			// input data for Transfer
-			tokenIDs = [][]byte{[]byte("id1"), []byte("id2")}
+			tokenIDs = []*token.TokenId{
+				{TxId: "id1", Index: 0},
+				{TxId: "id2", Index: 0},
+			}
 			transferShares = []*token.RecipientTransferShare{
 				{Recipient: []byte("alice"), Quantity: 100},
 				{Recipient: []byte("Bob"), Quantity: 50},
@@ -335,6 +338,124 @@ var _ = Describe("TokenClient", func() {
 		})
 	})
 
+	Describe("RequestRedeem", func() {
+		var (
+			tokenIDs          []*token.TokenId
+			quantity          uint64
+			marshalledCommand []byte
+			signedCommand     *token.SignedCommand
+		)
+
+		BeforeEach(func() {
+			// input data for redeem
+			tokenIDs = []*token.TokenId{
+				{TxId: "id1", Index: 0},
+				{TxId: "id2", Index: 0},
+			}
+
+			quantity = 100
+
+			command := &token.Command{
+				Header: commandHeader,
+				Payload: &token.Command_RedeemRequest{
+					RedeemRequest: &token.RedeemRequest{
+						TokenIds:         tokenIDs,
+						QuantityToRedeem: quantity,
+					},
+				},
+			}
+			marshalledCommand = ProtoMarshal(command)
+			signedCommand = &token.SignedCommand{
+				Command:   marshalledCommand,
+				Signature: []byte("pineapple"),
+			}
+		})
+
+		It("returns serialized token transaction", func() {
+			response, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(response).To(Equal(serializedTokenTx))
+
+			Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
+			Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
+			raw := fakeSigningIdentity.SignArgsForCall(0)
+			Expect(raw).To(Equal(marshalledCommand))
+
+			Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(1))
+			_, sc, _ := fakeProverClient.ProcessCommandArgsForCall(0)
+			Expect(sc).To(Equal(signedCommand))
+		})
+
+		Context("when Identity serialize fails", func() {
+			BeforeEach(func() {
+				fakeSigningIdentity.SerializeReturns(nil, errors.New("wild-banana"))
+			})
+
+			It("returns an error", func() {
+				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				Expect(err).To(MatchError("wild-banana"))
+				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
+				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(0))
+				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(0))
+			})
+		})
+
+		Context("when SigningIdentity sign fails", func() {
+			BeforeEach(func() {
+				fakeSigningIdentity.SignReturns(nil, errors.New("wild-banana"))
+			})
+
+			It("returns an error", func() {
+				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				Expect(err).To(MatchError("wild-banana"))
+				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(0))
+				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
+				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
+				raw := fakeSigningIdentity.SignArgsForCall(0)
+				Expect(raw).To(Equal(marshalledCommand))
+			})
+		})
+
+		Context("when processcommand fails", func() {
+			BeforeEach(func() {
+				fakeProverClient.ProcessCommandReturns(nil, errors.New("wild-banana"))
+			})
+
+			It("returns an error", func() {
+				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				Expect(err).To(MatchError("wild-banana"))
+				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
+				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(1))
+			})
+		})
+
+		Context("when ProcessCommand returns an error response", func() {
+			BeforeEach(func() {
+				commandResponse := &token.CommandResponse{
+					Payload: &token.CommandResponse_Err{
+						Err: &token.Error{
+							Message: "flying-pineapple",
+							Payload: []byte("payload"),
+						},
+					},
+				}
+				signedCommandResp = &token.SignedCommandResponse{
+					Response:  ProtoMarshal(commandResponse),
+					Signature: []byte("signature"),
+				}
+				fakeProverClient.ProcessCommandReturns(signedCommandResp, nil)
+			})
+
+			It("returns an error", func() {
+				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				Expect(err).To(MatchError("error from prover: flying-pineapple"))
+				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
+				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
+				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(1))
+			})
+		})
+	})
+
 	Describe("ListTokens", func() {
 		var (
 			marshalledCommand []byte
@@ -356,8 +477,8 @@ var _ = Describe("TokenClient", func() {
 
 			// prepare SignedCommandResponse for fakeProverClient to return
 			expectedTokens = []*token.TokenOutput{
-				{Id: []byte("idaz"), Type: "typeaz", Quantity: 135},
-				{Id: []byte("idby"), Type: "typeby", Quantity: 79},
+				{Id: &token.TokenId{TxId: "idaz", Index: 0}, Type: "typeaz", Quantity: 135},
+				{Id: &token.TokenId{TxId: "idby", Index: 0}, Type: "typeby", Quantity: 79},
 			}
 			commandResp := &token.CommandResponse{
 				Payload: &token.CommandResponse_UnspentTokens{

@@ -9,7 +9,6 @@ package server_test
 import (
 	"context"
 	"net"
-	"strconv"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -19,7 +18,6 @@ import (
 	mock2 "github.com/hyperledger/fabric/token/ledger/mock"
 	"github.com/hyperledger/fabric/token/server"
 	"github.com/hyperledger/fabric/token/server/mock"
-	"github.com/hyperledger/fabric/token/tms/plain"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
@@ -93,7 +91,7 @@ var _ = Describe("Prover", func() {
 				PlainAction: &token.PlainTokenAction{
 					Data: &token.PlainTokenAction_PlainTransfer{
 						PlainTransfer: &token.PlainTransfer{
-							Inputs: []*token.InputId{{
+							Inputs: []*token.TokenId{{
 								TxId:  "txid",
 								Index: 0,
 							}},
@@ -115,7 +113,7 @@ var _ = Describe("Prover", func() {
 				PlainAction: &token.PlainTokenAction{
 					Data: &token.PlainTokenAction_PlainRedeem{
 						PlainRedeem: &token.PlainTransfer{
-							Inputs: []*token.InputId{{
+							Inputs: []*token.TokenId{{
 								TxId:  "txid",
 								Index: 0,
 							}},
@@ -131,8 +129,8 @@ var _ = Describe("Prover", func() {
 		fakeTransactor.RequestRedeemReturns(redeemTokenTransaction, nil)
 
 		transactorTokens = []*token.TokenOutput{
-			{Id: []byte("idaz"), Type: "typeaz", Quantity: 135},
-			{Id: []byte("idby"), Type: "typeby", Quantity: 79},
+			{Id: &token.TokenId{TxId: "idaz", Index: 0}, Type: "typeaz", Quantity: 135},
+			{Id: &token.TokenId{TxId: "idby", Index: 0}, Type: "typeby", Quantity: 79},
 		}
 		unspentTokens = &token.UnspentTokens{Tokens: transactorTokens}
 
@@ -179,7 +177,7 @@ var _ = Describe("Prover", func() {
 
 		transferRequest = &token.TransferRequest{
 			Credential: []byte("credential"),
-			TokenIds:   [][]byte{},
+			TokenIds:   []*token.TokenId{},
 			Shares: []*token.RecipientTransferShare{{
 				Recipient: []byte("recipient"),
 				Quantity:  99,
@@ -188,7 +186,7 @@ var _ = Describe("Prover", func() {
 
 		redeemRequest = &token.RedeemRequest{
 			Credential:       []byte("credential"),
-			TokenIds:         [][]byte{},
+			TokenIds:         []*token.TokenId{},
 			QuantityToRedeem: 50,
 		}
 
@@ -217,7 +215,7 @@ var _ = Describe("Prover", func() {
 
 		transferExpectationRequest = &token.ExpectationRequest{
 			Credential: []byte("credential"),
-			TokenIds:   [][]byte{},
+			TokenIds:   []*token.TokenId{},
 			Expectation: &token.TokenExpectation{
 				Expectation: &token.TokenExpectation_PlainExpectation{
 					PlainExpectation: &token.PlainExpectation{
@@ -413,6 +411,15 @@ var _ = Describe("Prover", func() {
 				Expect(payload).To(Equal(&token.CommandResponse_Err{
 					Err: &token.Error{Message: "FabToken capability not enabled for channel channel-id"},
 				}))
+			})
+		})
+
+		Context("when a panic is thrown", func() {
+
+			It("returns nil response and no error", func() {
+				resp, err := prover.ProcessCommand(context.Background(), nil)
+				Expect(err).To(MatchError("ProcessCommand triggered panic: runtime error: invalid memory address or nil pointer dereference"))
+				Expect(resp).To(BeNil())
 			})
 		})
 	})
@@ -1154,12 +1161,11 @@ var _ = Describe("ProverListUnspentTokens", func() {
 		outputToken, err := proto.Marshal(&token.PlainOutput{Owner: []byte("Alice"), Type: "XYZ", Quantity: 100})
 		Expect(err).NotTo(HaveOccurred())
 
-		key, err := plain.GenerateKeyForTest("1", 0)
-		Expect(err).NotTo(HaveOccurred())
+		key := generateKey("1", "0", "tokenOutput")
 
 		queryResult = &queryresult.KV{Key: key, Value: outputToken}
 
-		unspentTokens := &token.UnspentTokens{Tokens: []*token.TokenOutput{{Type: "XYZ", Quantity: 100, Id: []byte(key)}}}
+		unspentTokens := &token.UnspentTokens{Tokens: []*token.TokenOutput{{Type: "XYZ", Quantity: 100, Id: &token.TokenId{TxId: "1", Index: 0}}}}
 		expectedResponse = &token.CommandResponse_UnspentTokens{UnspentTokens: unspentTokens}
 	})
 
@@ -1238,15 +1244,7 @@ var _ = Describe("Prover Transfer using TMS", func() {
 		transferRequest       *token.TransferRequest
 	)
 	It("initializes variables and expected responses", func() {
-
-		var err error
-		keys := make([]string, 2)
-		keys[0], err = plain.GenerateKeyForTest("1", 0)
-		Expect(err).NotTo(HaveOccurred())
-		keys[1], err = plain.GenerateKeyForTest("2", 1)
-		Expect(err).NotTo(HaveOccurred())
-
-		tokenIDs := [][]byte{[]byte(keys[0]), []byte(keys[1])}
+		tokenIDs := []*token.TokenId{{TxId: "1", Index: 0}, {TxId: "2", Index: 1}}
 
 		shares := []*token.RecipientTransferShare{
 			{Recipient: []byte("Alice"), Quantity: 20},
@@ -1271,8 +1269,6 @@ var _ = Describe("Prover Transfer using TMS", func() {
 			Signature: []byte("command-signature"),
 		}
 
-		inputIDs, err := getInputIDs(keys)
-
 		outTokens := make([]*token.PlainOutput, 3)
 		outTokens[0] = &token.PlainOutput{Owner: []byte("Alice"), Type: "XYZ", Quantity: 20}
 		outTokens[1] = &token.PlainOutput{Owner: []byte("Bob"), Type: "XYZ", Quantity: 250}
@@ -1283,7 +1279,7 @@ var _ = Describe("Prover Transfer using TMS", func() {
 				PlainAction: &token.PlainTokenAction{
 					Data: &token.PlainTokenAction_PlainTransfer{
 						PlainTransfer: &token.PlainTransfer{
-							Inputs:  inputIDs,
+							Inputs:  tokenIDs,
 							Outputs: outTokens,
 						},
 					},
@@ -1415,7 +1411,7 @@ var _ = Describe("Prover Approve using mock TMS", func() {
 			PlainAction: &token.PlainTokenAction{
 				Data: &token.PlainTokenAction_PlainApprove{
 					PlainApprove: &token.PlainApprove{
-						Inputs: []*token.InputId{{
+						Inputs: []*token.TokenId{{
 							TxId:  "txid",
 							Index: 0,
 						}},
@@ -1569,7 +1565,7 @@ var _ = Describe("RequestTransferFrom using mock TMS", func() {
 			PlainAction: &token.PlainTokenAction{
 				Data: &token.PlainTokenAction_PlainTransfer_From{
 					PlainTransfer_From: &token.PlainTransferFrom{
-						Inputs: []*token.InputId{{
+						Inputs: []*token.TokenId{{
 							TxId:  "txid",
 							Index: 0,
 						}},
@@ -1710,23 +1706,6 @@ func splitCompositeKey(compositeKey string) (string, []string, error) {
 	return components[0], components[1:], nil
 }
 
-func getInputIDs(keys []string) ([]*token.InputId, error) {
-	inputIDs := make([]*token.InputId, len(keys))
-	for i := 0; i < len(keys); i++ {
-		_, indices, err := splitCompositeKey(keys[i])
-
-		if err != nil {
-			return nil, err
-		}
-		if len(indices) != 2 {
-			return nil, errors.New("error splitting composite keys")
-		}
-
-		index, err := strconv.Atoi(indices[1])
-		if err != nil {
-			return nil, err
-		}
-		inputIDs[i] = &token.InputId{TxId: indices[0], Index: uint32(index)}
-	}
-	return inputIDs, nil
+func generateKey(txID, index, namespace string) string {
+	return "\x00" + namespace + "\x00" + txID + "\x00" + index + "\x00"
 }

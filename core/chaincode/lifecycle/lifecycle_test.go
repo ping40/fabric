@@ -10,9 +10,9 @@ import (
 	"fmt"
 
 	"github.com/hyperledger/fabric/common/chaincode"
-	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle/mock"
+	cb "github.com/hyperledger/fabric/protos/common"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -142,8 +142,8 @@ var _ = Describe("Lifecycle", func() {
 			fakePublicState *mock.ReadWritableState
 			fakeOrgState    *mock.ReadWritableState
 
-			fakeOrgKVStore    map[string][]byte
-			fakePublicKVStore map[string][]byte
+			fakeOrgKVStore    MapLedgerShim
+			fakePublicKVStore MapLedgerShim
 
 			testDefinition *lifecycle.ChaincodeDefinition
 		)
@@ -158,31 +158,19 @@ var _ = Describe("Lifecycle", func() {
 			}
 
 			fakePublicState = &mock.ReadWritableState{}
-			fakePublicKVStore = map[string][]byte{}
+			fakePublicKVStore = MapLedgerShim(map[string][]byte{})
 			fakePublicState = &mock.ReadWritableState{}
-			fakePublicState.PutStateStub = func(key string, value []byte) error {
-				fakePublicKVStore[key] = value
-				return nil
-			}
+			fakePublicState.PutStateStub = fakePublicKVStore.PutState
+			fakePublicState.GetStateStub = fakePublicKVStore.GetState
 
-			fakePublicState.GetStateStub = func(key string) ([]byte, error) {
-				return fakePublicKVStore[key], nil
-			}
-
-			fakeOrgKVStore = map[string][]byte{}
+			fakeOrgKVStore = MapLedgerShim(map[string][]byte{})
 			fakeOrgState = &mock.ReadWritableState{}
-			fakeOrgState.PutStateStub = func(key string, value []byte) error {
-				fakeOrgKVStore[key] = value
-				return nil
-			}
-
-			fakeOrgState.GetStateStub = func(key string) ([]byte, error) {
-				return fakeOrgKVStore[key], nil
-			}
+			fakeOrgState.PutStateStub = fakeOrgKVStore.PutState
+			fakeOrgState.GetStateStub = fakeOrgKVStore.GetState
 
 			err := l.Serializer.Serialize("namespaces", "cc-name", &lifecycle.DefinedChaincode{
 				Sequence: 4,
-			}, fakePublicState)
+			}, fakePublicKVStore)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
@@ -193,11 +181,21 @@ var _ = Describe("Lifecycle", func() {
 			committedDefinition := &lifecycle.ChaincodeParameters{}
 			err = l.Serializer.Deserialize("namespaces", "cc-name#5", committedDefinition, fakeOrgState)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(committedDefinition).To(Equal(&lifecycle.ChaincodeParameters{
-				Version:             "version",
-				Hash:                []byte{},
-				ValidationParameter: []byte{},
-			}))
+			Expect(committedDefinition.Version).To(Equal("version"))
+			Expect(committedDefinition.Hash).To(BeEmpty())
+			Expect(committedDefinition.ValidationParameter).To(BeEmpty())
+			Expect(proto.Equal(committedDefinition.Collections, &cb.CollectionConfigPackage{})).To(BeTrue())
+		})
+
+		Context("when the current sequence is undefined and the requested sequence is 0", func() {
+			BeforeEach(func() {
+				fakePublicKVStore = map[string][]byte{}
+			})
+
+			It("returns an error", func() {
+				err := l.DefineChaincodeForOrg(&lifecycle.ChaincodeDefinition{}, fakePublicState, fakeOrgState)
+				Expect(err).To(MatchError("requested sequence is 0, but first definable sequence number is 1"))
+			})
 		})
 
 		Context("when the sequence number already has a definition", func() {
@@ -294,6 +292,25 @@ var _ = Describe("Lifecycle", func() {
 					Expect(err).To(MatchError("attempted to define the current sequence (5) for namespace cc-name, but Hash '' != '646966666572656e74'"))
 				})
 			})
+
+			Context("when the Collections differ from the current definition", func() {
+				BeforeEach(func() {
+					testDefinition.Parameters.Collections = &cb.CollectionConfigPackage{
+						Config: []*cb.CollectionConfig{
+							{
+								Payload: &cb.CollectionConfig_StaticCollectionConfig{
+									StaticCollectionConfig: &cb.StaticCollectionConfig{Name: "foo"},
+								},
+							},
+						},
+					}
+				})
+
+				It("returns an error", func() {
+					err := l.DefineChaincodeForOrg(testDefinition, fakePublicState, fakeOrgState)
+					Expect(err).To(MatchError("attempted to define the current sequence (5) for namespace cc-name, but Collections do not match"))
+				})
+			})
 		})
 
 		Context("when the definition is for an expired sequence number", func() {
@@ -331,7 +348,6 @@ var _ = Describe("Lifecycle", func() {
 
 		Context("when writing to the public state fails", func() {
 			BeforeEach(func() {
-				fakeOrgState.PutStateStub = nil
 				fakeOrgState.PutStateReturns(fmt.Errorf("put-state-error"))
 			})
 
@@ -342,14 +358,14 @@ var _ = Describe("Lifecycle", func() {
 		})
 	})
 
-	Describe("Define", func() {
+	Describe("DefineChaincode", func() {
 		var (
 			fakePublicState *mock.ReadWritableState
 			fakeOrgStates   []*mock.ReadWritableState
 
 			testDefinition *lifecycle.ChaincodeDefinition
 
-			publicKVS, org0KVS, org1KVS map[string][]byte
+			publicKVS, org0KVS, org1KVS MapLedgerShim
 		)
 
 		BeforeEach(func() {
@@ -365,16 +381,11 @@ var _ = Describe("Lifecycle", func() {
 				},
 			}
 
-			publicKVS = map[string][]byte{}
+			publicKVS = MapLedgerShim(map[string][]byte{})
 			fakePublicState = &mock.ReadWritableState{}
-			fakePublicState.GetStateReturns(proto.EncodeVarint(uint64(4)), nil)
-			fakePublicState.GetStateStub = func(key string) ([]byte, error) {
-				return publicKVS[key], nil
-			}
-			fakePublicState.PutStateStub = func(key string, value []byte) error {
-				publicKVS[key] = value
-				return nil
-			}
+			fakePublicState.GetStateStub = publicKVS.GetState
+			fakePublicState.PutStateStub = publicKVS.PutState
+
 			l.Serializer.Serialize("namespaces", "cc-name", &lifecycle.DefinedChaincode{
 				Sequence:            4,
 				Version:             "version",
@@ -382,25 +393,16 @@ var _ = Describe("Lifecycle", func() {
 				EndorsementPlugin:   "endorsement-plugin",
 				ValidationPlugin:    "validation-plugin",
 				ValidationParameter: []byte("validation-parameter"),
-			}, fakePublicState)
+			}, publicKVS)
 
-			org0KVS = map[string][]byte{}
-			org1KVS = map[string][]byte{}
+			org0KVS = MapLedgerShim(map[string][]byte{})
+			org1KVS = MapLedgerShim(map[string][]byte{})
 			fakeOrgStates = []*mock.ReadWritableState{{}, {}}
-			for i, kvs := range []map[string][]byte{org0KVS, org1KVS} {
+			for i, kvs := range []MapLedgerShim{org0KVS, org1KVS} {
 				kvs := kvs
-				fakeOrgStates[i].GetStateStub = func(key string) ([]byte, error) {
-					return kvs[key], nil
-				}
-
-				fakeOrgStates[i].GetStateHashStub = func(key string) ([]byte, error) {
-					return util.ComputeSHA256(kvs[key]), nil
-				}
-
-				fakeOrgStates[i].PutStateStub = func(key string, value []byte) error {
-					kvs[key] = value
-					return nil
-				}
+				fakeOrgStates[i].GetStateStub = kvs.GetState
+				fakeOrgStates[i].GetStateHashStub = kvs.GetStateHash
+				fakeOrgStates[i].PutStateStub = kvs.PutState
 			}
 
 			l.Serializer.Serialize("namespaces", "cc-name#5", testDefinition.Parameters, fakeOrgStates[0])
@@ -450,6 +452,92 @@ var _ = Describe("Lifecycle", func() {
 			It("returns an error", func() {
 				_, err := l.DefineChaincode(testDefinition, fakePublicState, []lifecycle.OpaqueState{fakeOrgStates[0], fakeOrgStates[1]})
 				Expect(err).To(MatchError("requested sequence is 5, but new definition must be sequence 4"))
+			})
+		})
+	})
+
+	Describe("QueryDefinedChaincode", func() {
+		var (
+			fakePublicState *mock.ReadWritableState
+
+			publicKVS MapLedgerShim
+		)
+
+		BeforeEach(func() {
+			publicKVS = MapLedgerShim(map[string][]byte{})
+			fakePublicState = &mock.ReadWritableState{}
+			fakePublicState.GetStateStub = publicKVS.GetState
+			fakePublicState.PutStateStub = publicKVS.PutState
+
+			l.Serializer.Serialize("namespaces", "cc-name", &lifecycle.DefinedChaincode{
+				Sequence:            4,
+				Version:             "version",
+				Hash:                []byte("hash"),
+				EndorsementPlugin:   "endorsement-plugin",
+				ValidationPlugin:    "validation-plugin",
+				ValidationParameter: []byte("validation-parameter"),
+			}, publicKVS)
+		})
+
+		It("returns the defined chaincode", func() {
+			cc, err := l.QueryDefinedChaincode("cc-name", fakePublicState)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cc).To(Equal(&lifecycle.DefinedChaincode{
+				Sequence:            4,
+				Version:             "version",
+				Hash:                []byte("hash"),
+				EndorsementPlugin:   "endorsement-plugin",
+				ValidationPlugin:    "validation-plugin",
+				ValidationParameter: []byte("validation-parameter"),
+				Collections:         &cb.CollectionConfigPackage{},
+			}))
+		})
+
+		Context("when the chaincode is not defined", func() {
+			BeforeEach(func() {
+				fakePublicState.GetStateReturns(nil, nil)
+			})
+
+			It("returns an error", func() {
+				_, err := l.QueryDefinedChaincode("cc-name", fakePublicState)
+				Expect(err).To(MatchError("could not deserialize namespace cc-name as chaincode: could not unmarshal metadata for namespace namespaces/cc-name: no existing serialized message found"))
+			})
+		})
+	})
+
+	Describe("QueryDefinedNamespaces", func() {
+		var (
+			fakePublicState *mock.ReadWritableState
+
+			publicKVS MapLedgerShim
+		)
+
+		BeforeEach(func() {
+			publicKVS = MapLedgerShim(map[string][]byte{})
+			fakePublicState = &mock.ReadWritableState{}
+			fakePublicState.GetStateStub = publicKVS.GetState
+			fakePublicState.GetStateRangeStub = publicKVS.GetStateRange
+			l.Serializer.Serialize("namespaces", "cc-name", &lifecycle.DefinedChaincode{}, publicKVS)
+			l.Serializer.Serialize("namespaces", "other-name", &lifecycle.ChaincodeParameters{}, publicKVS)
+		})
+
+		It("returns the defined namespaces", func() {
+			result, err := l.QueryDefinedNamespaces(fakePublicState)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(map[string]string{
+				"cc-name":    "Chaincode",
+				"other-name": "ChaincodeParameters",
+			}))
+		})
+
+		Context("when the range cannot be retrieved", func() {
+			BeforeEach(func() {
+				fakePublicState.GetStateRangeReturns(nil, fmt.Errorf("state-range-error"))
+			})
+
+			It("returns an error", func() {
+				_, err := l.QueryDefinedNamespaces(fakePublicState)
+				Expect(err).To(MatchError("could not query namespace metadata: could not get state range for namespace namespaces: state-range-error"))
 			})
 		})
 	})

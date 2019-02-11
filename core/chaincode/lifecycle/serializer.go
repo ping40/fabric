@@ -32,6 +32,10 @@ type OpaqueState interface {
 	GetStateHash(key string) (value []byte, err error)
 }
 
+type RangeableState interface {
+	GetStateRange(prefix string) (map[string][]byte, error)
+}
+
 type Marshaler func(proto.Message) ([]byte, error)
 
 func (m Marshaler) Marshal(msg proto.Message) ([]byte, error) {
@@ -40,6 +44,8 @@ func (m Marshaler) Marshal(msg proto.Message) ([]byte, error) {
 	}
 	return proto.Marshal(msg)
 }
+
+var ProtoMessageType = reflect.TypeOf((*proto.Message)(nil)).Elem()
 
 // Serializer is used to write structures into the db and to read them back out.
 // Although it's unfortunate to write a custom serializer, rather than to use something
@@ -78,6 +84,10 @@ func (s *Serializer) SerializableChecks(structure interface{}) (reflect.Value, [
 		case reflect.Slice:
 			if fieldValue.Type().Elem().Kind() != reflect.Uint8 {
 				return reflect.Value{}, nil, errors.Errorf("unsupported slice type %v for field %s", fieldValue.Type().Elem().Kind(), fieldName)
+			}
+		case reflect.Ptr:
+			if !fieldValue.Type().Implements(ProtoMessageType) {
+				return reflect.Value{}, nil, errors.Errorf("unsupported pointer type %v for field %s (must be proto)", fieldValue.Type().Elem(), fieldName)
 			}
 		default:
 			return reflect.Value{}, nil, errors.Errorf("unsupported structure field kind %v for serialization for field %s", fieldValue.Kind(), fieldName)
@@ -128,6 +138,15 @@ func (s *Serializer) Serialize(namespace, name string, structure interface{}, st
 			stateData.Type = &lb.StateData_Uint64{Uint64: fieldValue.Uint()}
 		case reflect.Slice:
 			stateData.Type = &lb.StateData_Bytes{Bytes: fieldValue.Bytes()}
+		case reflect.Ptr:
+			var bin []byte
+			if !fieldValue.IsNil() {
+				bin, err = s.Marshaler.Marshal(fieldValue.Interface().(proto.Message))
+				if err != nil {
+					return errors.Wrapf(err, "could not marshal field %s", fieldName)
+				}
+			}
+			stateData.Type = &lb.StateData_Bytes{Bytes: bin}
 			// Note, other field kinds and bad slice types have already been checked by SerializableChecks
 		}
 
@@ -222,6 +241,15 @@ func (s *Serializer) IsSerialized(namespace, name string, structure interface{},
 			stateData.Type = &lb.StateData_Uint64{Uint64: fieldValue.Uint()}
 		case reflect.Slice:
 			stateData.Type = &lb.StateData_Bytes{Bytes: fieldValue.Bytes()}
+		case reflect.Ptr:
+			var bin []byte
+			if !fieldValue.IsNil() {
+				bin, err = s.Marshaler.Marshal(fieldValue.Interface().(proto.Message))
+				if err != nil {
+					return false, errors.Wrapf(err, "could not marshal field %s", fieldName)
+				}
+			}
+			stateData.Type = &lb.StateData_Bytes{Bytes: bin}
 			// Note, other field kinds and bad slice types have already been checked by SerializableChecks
 		}
 
@@ -287,6 +315,13 @@ func (s *Serializer) Deserialize(namespace, name string, structure interface{}, 
 			if oneOf != nil {
 				fieldValue.SetBytes(oneOf)
 			}
+		case reflect.Ptr:
+			msg := reflect.New(fieldValue.Type().Elem())
+			err := s.DeserializeFieldAsProto(namespace, name, fieldName, state, msg.Interface().(proto.Message))
+			if err != nil {
+				return err
+			}
+			fieldValue.Set(msg)
 			// Note, other field kinds and bad slice types have already been checked by SerializableChecks
 		}
 	}
@@ -358,6 +393,18 @@ func (s *Serializer) DeserializeFieldAsBytes(namespace, name, field string, stat
 	return oneOf.Bytes, nil
 }
 
+func (s *Serializer) DeserializeFieldAsProto(namespace, name, field string, state ReadableState, msg proto.Message) error {
+	bin, err := s.DeserializeFieldAsBytes(namespace, name, field, state)
+	if err != nil {
+		return err
+	}
+	err = proto.Unmarshal(bin, msg)
+	if err != nil {
+		return errors.Wrapf(err, "could not unmarshal key %s/fields/%s/%s to %T", namespace, name, field, msg)
+	}
+	return nil
+}
+
 func (s *Serializer) DeserializeFieldAsInt64(namespace, name, field string, state ReadableState) (int64, error) {
 	value, err := s.DeserializeField(namespace, name, field, state)
 	if err != nil {
@@ -386,4 +433,23 @@ func (s *Serializer) DeserializeFieldAsUint64(namespace, name, field string, sta
 		return 0, errors.Errorf("expected key %s/fields/%s/%s to encode a value of type Uint64, but was %T", namespace, name, field, value.Type)
 	}
 	return oneOf.Uint64, nil
+}
+
+func (s *Serializer) DeserializeAllMetadata(namespace string, state RangeableState) (map[string]*lb.StateMetadata, error) {
+	prefix := fmt.Sprintf("%s/metadata/", namespace)
+	kvs, err := state.GetStateRange(prefix)
+	if err != nil {
+		return nil, errors.WithMessage(err, fmt.Sprintf("could not get state range for namespace %s", namespace))
+	}
+	result := map[string]*lb.StateMetadata{}
+	for key, value := range kvs {
+		name := key[len(prefix):]
+		metadata := &lb.StateMetadata{}
+		err = proto.Unmarshal(value, metadata)
+		if err != nil {
+			return nil, errors.Wrapf(err, "error unmarshaling metadata for key %s", key)
+		}
+		result[name] = metadata
+	}
+	return result, nil
 }

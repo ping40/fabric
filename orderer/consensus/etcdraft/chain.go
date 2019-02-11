@@ -30,10 +30,25 @@ import (
 	"github.com/pkg/errors"
 )
 
-// DefaultSnapshotCatchUpEntries is the default number of entries
-// to preserve in memory when a snapshot is taken. This is for
-// slow followers to catch up.
-const DefaultSnapshotCatchUpEntries = uint64(500)
+const (
+	BYTE = 1 << (10 * iota)
+	KILOBYTE
+	MEGABYTE
+	GIGABYTE
+	TERABYTE
+)
+
+const (
+	// DefaultSnapshotCatchUpEntries is the default number of entries
+	// to preserve in memory when a snapshot is taken. This is for
+	// slow followers to catch up.
+	DefaultSnapshotCatchUpEntries = uint64(20)
+
+	// DefaultSnapshotInterval is the default snapshot interval. It is
+	// used if SnapshotInterval is not provided in channel config options.
+	// It is needed to enforce snapshot being set.
+	DefaultSnapshotInterval = 100 * MEGABYTE // 100MB
+)
 
 //go:generate mockery -dir . -name Configurator -case underscore -output ./mocks/
 
@@ -47,7 +62,7 @@ type Configurator interface {
 
 // RPC is used to mock the transport layer in tests.
 type RPC interface {
-	Step(dest uint64, msg *orderer.StepRequest) (*orderer.StepResponse, error)
+	SendConsensus(dest uint64, msg *orderer.ConsensusRequest) error
 	SendSubmit(dest uint64, request *orderer.SubmitRequest) error
 }
 
@@ -59,6 +74,10 @@ type BlockPuller interface {
 	Close()
 }
 
+// CreateBlockPuller is a function to create BlockPuller on demand.
+// It is passed into chain initializer so that tests could mock this.
+type CreateBlockPuller func() (BlockPuller, error)
+
 // Options contains all the configurations relevant to the chain.
 type Options struct {
 	RaftID uint64
@@ -67,7 +86,7 @@ type Options struct {
 
 	WALDir       string
 	SnapDir      string
-	SnapInterval uint64
+	SnapInterval uint32
 
 	// This is configurable mainly for testing purpose. Users are not
 	// expected to alter this. Instead, DefaultSnapshotCatchUpEntries is used.
@@ -90,6 +109,12 @@ type submit struct {
 	leader chan uint64
 }
 
+type gc struct {
+	index uint64
+	state raftpb.ConfState
+	data  []byte
+}
+
 // Chain implements consensus.Chain interface.
 type Chain struct {
 	configurator Configurator
@@ -106,6 +131,7 @@ type Chain struct {
 	doneC    chan struct{}         // Closes when the chain halts
 	startC   chan struct{}         // Closes when the node is started
 	snapC    chan *raftpb.Snapshot // Signal to catch up with snapshot
+	gcC      chan *gc              // Signal to take snapshot
 
 	errorCLock sync.RWMutex
 	errorC     chan struct{} // returned by Errored()
@@ -123,9 +149,12 @@ type Chain struct {
 	appliedIndex uint64
 
 	// needed by snapshotting
+	sizeLimit        uint32 // SnapshotInterval in bytes
+	accDataSize      uint32 // accumulative data size since last snapshot
 	lastSnapBlockNum uint64
 	confState        raftpb.ConfState // Etcdraft requires ConfState to be persisted within snapshot
-	puller           BlockPuller      // Deliver client to pull blocks from other OSNs
+
+	createPuller CreateBlockPuller // func used to create BlockPuller on demand
 
 	fresh bool // indicate if this is a fresh raft node
 
@@ -141,7 +170,7 @@ func NewChain(
 	opts Options,
 	conf Configurator,
 	rpc RPC,
-	puller BlockPuller,
+	f CreateBlockPuller,
 	observeC chan<- raft.SoftState) (*Chain, error) {
 
 	lg := opts.Logger.With("channel", support.ChainID(), "node", opts.RaftID)
@@ -156,6 +185,11 @@ func NewChain(
 		storage.SnapshotCatchUpEntries = DefaultSnapshotCatchUpEntries
 	} else {
 		storage.SnapshotCatchUpEntries = opts.SnapshotCatchUpEntries
+	}
+
+	sizeLimit := opts.SnapInterval
+	if sizeLimit == 0 {
+		sizeLimit = DefaultSnapshotInterval
 	}
 
 	// get block number in last snapshot, if exists
@@ -177,12 +211,14 @@ func NewChain(
 		startC:           make(chan struct{}),
 		snapC:            make(chan *raftpb.Snapshot),
 		errorC:           make(chan struct{}),
+		gcC:              make(chan *gc),
 		observeC:         observeC,
 		support:          support,
 		fresh:            fresh,
 		appliedIndex:     opts.RaftMetadata.RaftIndex,
+		sizeLimit:        sizeLimit,
 		lastSnapBlockNum: snapBlkNum,
-		puller:           puller,
+		createPuller:     f,
 		clock:            opts.Clock,
 		logger:           lg,
 		opts:             opts,
@@ -201,6 +237,7 @@ func NewChain(
 		// PreVote prevents reconnected node from disturbing network.
 		// See etcd/raft doc for more details.
 		PreVote:                   true,
+		CheckQuorum:               true,
 		DisableProposalForwarding: true, // This prevents blocks from being accidentally proposed by followers
 	}
 
@@ -233,12 +270,13 @@ func (c *Chain) Start() {
 	close(c.startC)
 	close(c.errorC)
 
+	go c.gc()
 	go c.serveRequest()
 }
 
 // Order submits normal type transactions for ordering.
 func (c *Chain) Order(env *common.Envelope, configSeq uint64) error {
-	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Content: env, Channel: c.channelID}, 0)
+	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
 }
 
 // Configure submits config type transactions for ordering.
@@ -246,7 +284,7 @@ func (c *Chain) Configure(env *common.Envelope, configSeq uint64) error {
 	if err := c.checkConfigUpdateValidity(env); err != nil {
 		return err
 	}
-	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Content: env, Channel: c.channelID}, 0)
+	return c.Submit(&orderer.SubmitRequest{LastValidationSeq: configSeq, Payload: env, Channel: c.channelID}, 0)
 }
 
 // Validate the config update for being of Type A or Type B as described in the design doc.
@@ -341,8 +379,8 @@ func (c *Chain) isRunning() error {
 	return nil
 }
 
-// Step passes the given StepRequest message to the raft.Node instance
-func (c *Chain) Step(req *orderer.StepRequest, sender uint64) error {
+// Consensus passes the given ConsensusRequest message to the raft.Node instance
+func (c *Chain) Consensus(req *orderer.ConsensusRequest, sender uint64) error {
 	if err := c.isRunning(); err != nil {
 		return err
 	}
@@ -617,10 +655,10 @@ func (c *Chain) writeBlock(block *common.Block, index uint64) {
 func (c *Chain) ordered(msg *orderer.SubmitRequest) (batches [][]*common.Envelope, pending bool, err error) {
 	seq := c.support.Sequence()
 
-	if c.isConfig(msg.Content) {
+	if c.isConfig(msg.Payload) {
 		// ConfigMsg
 		if msg.LastValidationSeq < seq {
-			msg.Content, _, err = c.support.ProcessConfigMsg(msg.Content)
+			msg.Payload, _, err = c.support.ProcessConfigMsg(msg.Payload)
 			if err != nil {
 				return nil, true, errors.Errorf("bad config message: %s", err)
 			}
@@ -630,16 +668,16 @@ func (c *Chain) ordered(msg *orderer.SubmitRequest) (batches [][]*common.Envelop
 		if len(batch) != 0 {
 			batches = append(batches, batch)
 		}
-		batches = append(batches, []*common.Envelope{msg.Content})
+		batches = append(batches, []*common.Envelope{msg.Payload})
 		return batches, false, nil
 	}
 	// it is a normal message
 	if msg.LastValidationSeq < seq {
-		if _, err := c.support.ProcessNormalMsg(msg.Content); err != nil {
+		if _, err := c.support.ProcessNormalMsg(msg.Payload); err != nil {
 			return nil, true, errors.Errorf("bad normal message: %s", err)
 		}
 	}
-	batches, pending = c.support.BlockCutter().Ordered(msg.Content)
+	batches, pending = c.support.BlockCutter().Ordered(msg.Payload)
 	return batches, pending, nil
 
 }
@@ -678,12 +716,14 @@ func (c *Chain) catchUp(snap *raftpb.Snapshot) error {
 		return nil
 	}
 
-	defer func() {
-		c.puller.Close()
-	}()
+	puller, err := c.createPuller()
+	if err != nil {
+		return errors.Errorf("failed to create block puller: %s", err)
+	}
+	defer puller.Close()
 
 	for next <= b.Header.Number {
-		block := c.puller.PullBlock(next)
+		block := puller.PullBlock(next)
 		if block == nil {
 			return errors.Errorf("failed to fetch block %d from cluster", next)
 		}
@@ -725,6 +765,7 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 
 			appliedb = block.Header.Number
 			position = i
+			c.accDataSize += uint32(len(ents[i].Data))
 
 		case raftpb.EntryConfChange:
 			var cc raftpb.ConfChange
@@ -762,19 +803,37 @@ func (c *Chain) apply(ents []raftpb.Entry) {
 		}
 	}
 
-	if c.opts.SnapInterval == 0 || appliedb == 0 {
-		// snapshot is not enabled (SnapInterval == 0) or
+	if appliedb == 0 {
 		// no block has been written (appliedb == 0) in this round
 		return
 	}
 
-	if appliedb-c.lastSnapBlockNum >= c.opts.SnapInterval {
-		c.logger.Infof("Taking snapshot at block %d, last snapshotted block number is %d", appliedb, c.lastSnapBlockNum)
-		c.node.takeSnapshot(c.appliedIndex, &c.confState, ents[position].Data)
-		c.lastSnapBlockNum = appliedb
+	if c.accDataSize >= c.sizeLimit {
+		select {
+		case c.gcC <- &gc{index: c.appliedIndex, state: c.confState, data: ents[position].Data}:
+			c.logger.Infof("Accumulated %d bytes since last snapshot, exceeding size limit (%d bytes), "+
+				"taking snapshot at block %d, last snapshotted block number is %d",
+				c.accDataSize, c.sizeLimit, appliedb, c.lastSnapBlockNum)
+			c.accDataSize = 0
+			c.lastSnapBlockNum = appliedb
+		default:
+			c.logger.Warnf("Snapshotting is in progress, it is very likely that SnapshotInterval is too small")
+		}
 	}
 
 	return
+}
+
+func (c *Chain) gc() {
+	for {
+		select {
+		case g := <-c.gcC:
+			c.node.takeSnapshot(g.index, g.state, g.data)
+		case <-c.doneC:
+			c.logger.Infof("Stop garbage collecting")
+			return
+		}
+	}
 }
 
 func (c *Chain) isConfig(env *common.Envelope) bool {
@@ -787,6 +846,11 @@ func (c *Chain) isConfig(env *common.Envelope) bool {
 }
 
 func (c *Chain) configureComm() error {
+	// Reset unreachable map when communication is reconfigured
+	c.node.unreachableLock.Lock()
+	c.node.unreachable = make(map[uint64]struct{})
+	c.node.unreachableLock.Unlock()
+
 	nodes, err := c.remotePeers()
 	if err != nil {
 		return err
