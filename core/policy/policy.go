@@ -47,9 +47,9 @@ type PolicyChecker interface {
 }
 
 type policyChecker struct {
-	channelPolicyManagerGetter policies.ChannelPolicyManagerGetter
-	localMSP                   msp.IdentityDeserializer
-	principalGetter            mgmt.MSPPrincipalGetter
+	channelPolicyManagerGetter policies.ChannelPolicyManagerGetter //频道策略管理者获取器接口，在/fabric/peer/peer.go中实现
+	localMSP                   msp.IdentityDeserializer //本地MSP或MSPManager，在/fabric/msp中定义和实现
+	principalGetter            mgmt.MSPPrincipalGetter //MSP主角获取器，在/fabric/msp/mgmt/principal.go中定义和实现
 }
 
 // NewPolicyChecker creates a new instance of PolicyChecker

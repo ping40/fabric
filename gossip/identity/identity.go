@@ -61,7 +61,7 @@ type identityMapperImpl struct {
 	onPurge    purgeTrigger
 	mcs        api.MessageCryptoService
 	sa         api.SecurityAdvisor
-	pkiID2Cert map[string]*storedIdentity
+	pkiID2Cert map[string]*storedIdentity //在遍历pkiID2Cert中存储所有的身份结束后
 	sync.RWMutex
 	stopChan chan struct{}
 	sync.Once
@@ -195,7 +195,7 @@ func (is *identityMapperImpl) SuspectPeers(isSuspected api.PeerSuspector) {
 }
 
 // validateIdentities returns a list of identities that have been revoked, expired or haven't been
-// used for a long time
+// used for a long time 函数来获取无效身份列表
 func (is *identityMapperImpl) validateIdentities(isSuspected api.PeerSuspector) []*storedIdentity {
 	now := time.Now()
 	usageTh := GetIdentityUsageThreshold()

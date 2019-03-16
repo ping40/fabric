@@ -3,6 +3,8 @@ class Transaction {
   Actions  []*TransactionAction
 }
 
+note right of Transaction : 来源于 \n Envelope.Data
+
 class TransactionAction  {
     Header               []byte
     Payload              []byte
@@ -42,4 +44,10 @@ ProposalResponsePayload <--ChaincodeAction : extension
 
 note top of ChaincodeAction : Result 就是 rwset
 
+class Endorsement {
+	Endorser []byte
+	Signature  []byte
+}
+
+ChaincodeEndorsedAction <-- Endorsement
 @enduml

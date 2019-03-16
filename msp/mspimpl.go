@@ -34,7 +34,7 @@ type satisfiesPrincipalInternalFuncType func(id Identity, principal *m.MSPPrinci
 
 // This is an instantiation of an MSP that
 // uses BCCSP for its cryptographic primitives.
-type bccspmsp struct {
+type bccspmsp struct { //这里起名为bccspmsp，指的是该实现使用了bccsp作为其加密技术的提供者
 	// version specifies the behaviour of this msp
 	version MSPVersion
 	// The following function pointers are used to change the behaviour
@@ -79,7 +79,7 @@ type bccspmsp struct {
 	name string
 
 	// verification options for MSP members
-	opts *x509.VerifyOptions
+	opts *x509.VerifyOptions //opts在bccsmsp的Setup实现中被初始化为包含rootCerts和intermediateCerts两个证书池。
 
 	// list of certificate revocation lists
 	CRL []*pkix.CertificateList

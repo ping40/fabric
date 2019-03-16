@@ -146,7 +146,7 @@ func NewHandler(cm ChainManager, timeWindow time.Duration, mutualTLS bool, metri
 }
 
 // Handle receives incoming deliver requests.
-func (h *Handler) Handle(ctx context.Context, srv *Server) error {
+func (h *Handler) Handle(ctx context.Context, srv *Server) error { //这个方法是  order 执行的
 	addr := util.ExtractRemoteAddress(ctx)
 	logger.Errorf("Starting new deliver loop for %s", addr)
 	h.Metrics.StreamsOpened.Add(1)
@@ -163,7 +163,7 @@ func (h *Handler) Handle(ctx context.Context, srv *Server) error {
 			return err
 		}
 
-		status, err := h.deliverBlocks(ctx, srv, envelope)
+		status, err := h.deliverBlocks(ctx, srv, envelope) // 对消息进行处理并答复，核心过程
 		if err != nil {
 			return err
 		}

@@ -266,11 +266,11 @@ func NewGossipStateProvider(chainID string, services *ServicesMediator, ledger l
 	// Listen for incoming communication
 	go s.listen()
 	// Deliver in order messages into the incoming channel
-	go s.deliverPayloads()
+	go s.deliverPayloads()  //处理从orderer获取的块
 	// Execute anti entropy to fill missing gaps
-	go s.antiEntropy()
+	go s.antiEntropy() //处理缺失块
 	// Taking care of state request messages
-	go s.processStateRequests()
+	go s.processStateRequests() //处理状态请求消息
 
 	return s
 }
@@ -578,7 +578,7 @@ func (s *GossipStateProviderImpl) deliverPayloads() {
 						continue
 					}
 				}
-				if err := s.commitBlock(rawBlock, p); err != nil {
+				if err := s.commitBlock(rawBlock, p); err != nil {// 核心部分：提交区块到本地账本
 					if executionErr, isExecutionErr := err.(*vsccErrors.VSCCExecutionFailureError); isExecutionErr {
 						logger.Errorf("Failed executing VSCC due to %v. Aborting chain processing", executionErr)
 						return
@@ -648,7 +648,7 @@ func (s *GossipStateProviderImpl) requestBlocksInRange(start uint64, end uint64)
 	defer atomic.StoreInt32(&s.stateTransferActive, 0)
 
 	for prev := start; prev <= end; {
-		next := min(end, prev+defAntiEntropyBatchSize)
+		next := min(end, prev+defAntiEntropyBatchSize) //一批最大10个
 
 		gossipMsg := s.stateRequestMessage(prev, next)
 
@@ -662,7 +662,7 @@ func (s *GossipStateProviderImpl) requestBlocksInRange(start uint64, end uint64)
 				return
 			}
 			// Select peers to ask for blocks
-			peer, err := s.selectPeerToRequestFrom(next)
+			peer, err := s.selectPeerToRequestFrom(next) //确定peer
 			if err != nil {
 				logger.Warningf("Cannot send state request for blocks in range [%d...%d), due to %+v",
 					prev, next, errors.WithStack(err))

@@ -64,10 +64,10 @@ type MessageReplacingPolicy func(this interface{}, that interface{}) Invalidatio
 type InvalidationResult int
 
 const (
-	// MessageNoAction means messages have no relation
+	// MessageNoAction means messages have no relation二个消息可能是不同类型，二个消息不进行比较，二个消息都是有效的。
 	MessageNoAction InvalidationResult = iota
-	// MessageInvalidates means message invalidates the other message
+	// MessageInvalidates means message invalidates the other message 新来的消息 要淘汰 一个旧消息（已经保存在 messagestore里面了）
 	MessageInvalidates
-	// MessageInvalidated means message is invalidated by the other message
+	// MessageInvalidated means message is invalidated by the other message 新来的消息无效
 	MessageInvalidated
 )

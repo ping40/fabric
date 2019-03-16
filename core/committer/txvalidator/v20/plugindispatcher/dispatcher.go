@@ -160,7 +160,7 @@ func (v *dispatcherImpl) Dispatch(seq int, payload *common.Payload, envBytes []b
 	}
 
 	for _, ns := range txRWSet.NsRwSets {
-		if !v.txWritesToNamespace(ns) {
+		if !v.txWritesToNamespace(ns) {//判断是否有写操作 ？
 			continue
 		}
 
@@ -201,7 +201,7 @@ func (v *dispatcherImpl) Dispatch(seq int, payload *common.Payload, envBytes []b
 	}
 
 	// validate *EACH* read write set according to its chaincode's endorsement policy
-	for _, ns := range wrNamespace {
+	for _, ns := range wrNamespace { // 有点不清楚......
 		// Get latest chaincode validation plugin name and policy
 		validationPlugin, policy, err := v.GetInfoForValidate(chdr, ns)
 		if err != nil {

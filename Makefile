@@ -98,7 +98,7 @@ GOSHIM_DEPS = $(shell ./scripts/goListFiles.sh $(PKGNAME)/core/chaincode/shim)
 PROTOS = $(shell git ls-files *.proto | grep -Ev 'vendor/|testdata/')
 # No sense rebuilding when non production code is changed
 PROJECT_FILES = $(shell git ls-files  | grep -v ^test | grep -v ^unit-test | \
-	grep -v ^.git | grep -v ^examples | grep -v ^devenv | grep -v .png$ | \
+	grep -v ^.git | grep -v ^examples | grep -v ^devenv | grep  .go$ | \
 	grep -v ^LICENSE | grep -v ^vendor )
 RELEASE_TEMPLATES = $(shell git ls-files | grep "release/templates")
 IMAGES = peer orderer baseos ccenv buildenv tools

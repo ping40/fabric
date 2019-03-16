@@ -131,7 +131,7 @@ func preprocessProtoBlock(txMgr txmgr.TxMgr,
 		txType := common.HeaderType(chdr.Type)
 		logger.Debugf("txType=%s", txType)
 		txStatInfo.TxType = txType
-		if txType == common.HeaderType_ENDORSER_TRANSACTION {
+		if txType == common.HeaderType_ENDORSER_TRANSACTION { // 处理 endorser 交易
 			// extract actions from the envelope message
 			respPayload, err := utils.GetActionFromEnvelope(envBytes)
 			if err != nil {
@@ -144,7 +144,7 @@ func preprocessProtoBlock(txMgr txmgr.TxMgr,
 				txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
 				continue
 			}
-		} else {
+		} else { // 处理配置更新交易
 			rwsetProto, err := processNonEndorserTx(env, chdr.TxId, txType, txMgr, !doMVCCValidation)
 			if _, ok := err.(*customtx.InvalidTxError); ok {
 				txsFilter.SetFlag(txIndex, peer.TxValidationCode_INVALID_OTHER_REASON)
@@ -159,7 +159,7 @@ func preprocessProtoBlock(txMgr txmgr.TxMgr,
 				}
 			}
 		}
-		if txRWSet != nil {
+		if txRWSet != nil { // 检查读写集是否符合数据库要求格式
 			txStatInfo.NumCollections = txRWSet.NumCollections()
 			if err := validateWriteset(txRWSet, validateKVFunc); err != nil {
 				logger.Warningf("Channel [%s]: Block [%d] Transaction index [%d] TxId [%s]"+

@@ -108,7 +108,7 @@ func leaderInvalidationPolicy(thisMsg *LeadershipMessage, thatMsg *LeadershipMes
 	return compareTimestamps(thisMsg.Timestamp, thatMsg.Timestamp)
 }
 
-func compareTimestamps(thisTS *PeerTime, thatTS *PeerTime) common.InvalidationResult {
+func compareTimestamps(thisTS *PeerTime, thatTS *PeerTime) common.InvalidationResult { // this 代表新消息
 	if thisTS.IncNum == thatTS.IncNum {
 		if thisTS.SeqNum > thatTS.SeqNum {
 			return common.MessageInvalidates

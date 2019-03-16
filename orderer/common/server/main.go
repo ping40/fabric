@@ -98,7 +98,7 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 	}
 
 	clusterType := isClusterType(bootstrapBlock)
-	signer := localmsp.NewSigner()
+	signer := localmsp.NewSigner() // 初始化签名结构
 
 	lf, _ := createLedgerFactory(conf)
 
@@ -153,7 +153,7 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 			}
 		}
 	}
-
+	// 初始化账本管理器（Registrar）结构
 	manager := initializeMultichannelRegistrar(bootstrapBlock, r, clusterDialer, clusterServerConfig, clusterGRPCServer, conf, signer, metricsProvider, lf, tlsCallback)
 	mutualTLS := serverConfig.SecOpts.UseTLS && serverConfig.SecOpts.RequireClientCert
 	server := NewServer(manager, metricsProvider, &conf.Debug, conf.General.Authentication.TimeWindow, mutualTLS)

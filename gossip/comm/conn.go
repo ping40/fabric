@@ -39,7 +39,7 @@ type connectionStore struct {
 	isClosing        bool                   // whether this connection store is shutting down
 	connFactory      connFactory            // creates a connection to remote peer
 	sync.RWMutex                            // synchronize access to shared variables
-	pki2Conn         map[string]*connection // mapping between pkiID to connections
+	pki2Conn         map[string]*connection // mapping between pkiID to connections 所有的connection都存储在connectionStore的成员pki2Conn中
 	destinationLocks map[string]*sync.Mutex //mapping between pkiIDs and locks,
 	// used to prevent concurrent connection establishment to the same remote endpoint
 }
@@ -219,7 +219,7 @@ type connection struct {
 	conn         *grpc.ClientConn                // gRPC connection to remote endpoint
 	cl           proto.GossipClient              // gRPC stub of remote endpoint
 	clientStream proto.Gossip_GossipStreamClient // client-side stream to remote endpoint
-	serverStream proto.Gossip_GossipStreamServer // server-side stream to remote endpoint
+	serverStream proto.Gossip_GossipStreamServer // server-side stream to remote endpoint cs,ss 仅仅 一个是非空
 	stopFlag     int32                           // indicates whether this connection is in process of stopping
 	stopChan     chan struct{}                   // a method to stop the server-side gRPC call from a different go-routine
 	sync.RWMutex                                 // synchronizes access to shared variables

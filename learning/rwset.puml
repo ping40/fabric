@@ -5,6 +5,7 @@ class TxReadWriteSet {
  NsRwset []*NsReadWriteSet
 }
 
+note left of TxReadWriteSet :ChaincodeAction 的Result
 class NsReadWriteSet {
  Namespace string
  Rwset []byte

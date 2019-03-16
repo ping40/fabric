@@ -328,7 +328,7 @@ func createChain(cid string, ledger ledger.PeerLedger, cb *common.Block, ccp ccp
 
 	channelconfig.LogSanityChecks(bundle)
 
-	gossipEventer := service.GetGossipService().NewConfigEventer()
+	gossipEventer := service.GetGossipService().NewConfigEventer() // 返回一个可更新gossip服务器配置的对象
 
 	gossipCallbackWrapper := func(bundle *channelconfig.Bundle) {
 		ac, ok := bundle.ApplicationConfig()

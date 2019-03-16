@@ -52,7 +52,8 @@ func LoadLocalMsp(dir string, bccspConfig *factory.FactoryOpts, mspID string) er
 // HOWEVER IN THE INTERIM, THESE HELPER FUNCTIONS ARE REQUIRED
 
 var m sync.Mutex
-var localMsp msp.MSP
+var localMsp msp.MSP // 本地MSP，管理了所有本地的身份。
+// 本地存储的按chaincodeID为key的MSPManager映射
 var mspMap map[string]msp.MSPManager = make(map[string]msp.MSPManager)
 var mspLogger = flogging.MustGetLogger("msp")
 

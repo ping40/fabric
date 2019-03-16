@@ -39,6 +39,7 @@ const (
 
 type channelRoutingFilterFactory func(channel.GossipChannel) filter.RoutingFilter
 
+// gossip服务,不是gossip服务器
 type gossipServiceImpl struct {
 	selfIdentity          api.PeerIdentityType
 	includeIdentityPeriod time.Time
@@ -95,7 +96,7 @@ func NewGossipService(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 		g.comm.CloseConn(&comm.RemotePeer{PKIID: pkiID})
 		g.certPuller.Remove(string(pkiID))
 	}, sa)
-
+	//将GossipServer实例注册至peerServer
 	if s == nil {
 		g.comm, err = createCommWithServer(conf.BindPort, g.idMapper, selfIdentity,
 			secureDialOpts, sa, gossipMetrics.CommMetrics)
@@ -116,7 +117,7 @@ func NewGossipService(conf *Config, s *grpc.Server, sa api.SecurityAdvisor,
 
 	g.discAdapter = g.newDiscoveryAdapter()
 	g.disSecAdap = g.newDiscoverySecurityAdapter()
-	g.disc = discovery.NewDiscoveryService(g.selfNetworkMember(), g.discAdapter, g.disSecAdap, g.disclosurePolicy)
+	g.disc = discovery.NewDiscoveryService(g.selfNetworkMember(), g.discAdapter, g.disSecAdap, g.disclosurePolicy) //初始化discovery模块
 	g.logger.Infof("Creating gossip service with self membership of %s", g.selfNetworkMember())
 
 	g.certPuller = g.createCertStorePuller()
@@ -289,7 +290,7 @@ func (g *gossipServiceImpl) syncDiscovery() {
 	}
 }
 
-func (g *gossipServiceImpl) start() {
+func (g *gossipServiceImpl) start() { // 刚刚开始
 	go g.syncDiscovery()
 	go g.handlePresumedDead()
 
@@ -373,7 +374,7 @@ func (g *gossipServiceImpl) handleMessage(m proto.ReceivedMessage) {
 		return
 	}
 
-	if selectOnlyDiscoveryMessages(m) {
+	if selectOnlyDiscoveryMessages(m) {  // 路由给 discovery 处理
 		// It's a membership request, check its self information
 		// matches the sender
 		if m.GetGossipMessage().GetMemReq() != nil {
@@ -1072,7 +1073,7 @@ func (sa *discoverySecurityAdapter) validateAliveMsgSignature(m *proto.SignedGos
 
 func (g *gossipServiceImpl) createCertStorePuller() pull.Mediator {
 	conf := pull.Config{
-		MsgType:           proto.PullMsgType_IDENTITY_MSG,
+		MsgType:           proto.PullMsgType_IDENTITY_MSG, //;身份消息类型 目前一共二个类型
 		Channel:           []byte(""),
 		ID:                g.conf.InternalEndpoint,
 		PeerCountToSelect: g.conf.PullPeerNum,
