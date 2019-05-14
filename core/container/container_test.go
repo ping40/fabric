@@ -32,7 +32,7 @@ var _ = Describe("Container", func() {// ginkgo 例子
 
 			BeforeEach(func() {
 				startReq = &container.StartContainerReq{
-					CCID: ccintf.CCID{Name: "start-name"},
+					CCID: ccintf.CCID("start:name"),
 					Args: []string{"foo", "bar"},
 					Env:  []string{"Bar", "Foo"},
 					FilesToUpload: map[string][]byte{
@@ -47,8 +47,13 @@ var _ = Describe("Container", func() {// ginkgo 例子
 					err := startReq.Do(fakeVM)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(fakeVM.StartCallCount()).To(Equal(1))
+<<<<<<< HEAD
 					ccid, args, env, filesToUpload, builder := fakeVM.StartArgsForCall(0)//获取调用参数
 					Expect(ccid).To(Equal(ccintf.CCID{Name: "start-name"}))
+=======
+					ccid, args, env, filesToUpload, builder := fakeVM.StartArgsForCall(0)
+					Expect(ccid).To(Equal(ccintf.CCID("start:name")))
+>>>>>>> upstream/master
 					Expect(args).To(Equal([]string{"foo", "bar"}))
 					Expect(env).To(Equal([]string{"Bar", "Foo"}))
 					Expect(filesToUpload).To(Equal(map[string][]byte{
@@ -68,7 +73,7 @@ var _ = Describe("Container", func() {// ginkgo 例子
 
 			Describe("GetCCID", func() {
 				It("Returns the CCID embedded in the structure", func() {
-					Expect(startReq.GetCCID()).To(Equal(ccintf.CCID{Name: "start-name"}))
+					Expect(startReq.GetCCID()).To(Equal(ccintf.CCID("start:name")))
 				})
 			})
 		})
@@ -80,7 +85,7 @@ var _ = Describe("Container", func() {// ginkgo 例子
 
 			BeforeEach(func() {
 				stopReq = &container.StopContainerReq{
-					CCID:       ccintf.CCID{Name: "stop-name"},
+					CCID:       ccintf.CCID("stop:name"),
 					Timeout:    283,
 					Dontkill:   true,
 					Dontremove: false,
@@ -93,7 +98,7 @@ var _ = Describe("Container", func() {// ginkgo 例子
 					Expect(resp).To(BeNil())
 					Expect(fakeVM.StopCallCount()).To(Equal(1))
 					ccid, timeout, dontKill, dontRemove := fakeVM.StopArgsForCall(0)
-					Expect(ccid).To(Equal(ccintf.CCID{Name: "stop-name"}))
+					Expect(ccid).To(Equal(ccintf.CCID("stop:name")))
 					Expect(timeout).To(Equal(uint(283)))
 					Expect(dontKill).To(Equal(true))
 					Expect(dontRemove).To(Equal(false))
@@ -110,7 +115,7 @@ var _ = Describe("Container", func() {// ginkgo 例子
 
 			Describe("GetCCID", func() {
 				It("Returns the CCID embedded in the structure", func() {
-					Expect(stopReq.GetCCID()).To(Equal(ccintf.CCID{Name: "stop-name"}))
+					Expect(stopReq.GetCCID()).To(Equal(ccintf.CCID("stop:name")))
 				})
 			})
 		})

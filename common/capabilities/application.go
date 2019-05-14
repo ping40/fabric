@@ -30,19 +30,16 @@ const (
 
 	// ApplicationResourcesTreeExperimental is the capabilties string for private data using the experimental feature of collections/sideDB.
 	ApplicationResourcesTreeExperimental = "V1_1_RESOURCETREE_EXPERIMENTAL"
-
-	ApplicationFabTokenExperimental = "V1_4_FABTOKEN_EXPERIMENTAL"
 )
 
 // ApplicationProvider provides capabilities information for application level config.
 type ApplicationProvider struct {
 	*registry
-	v11                     bool
-	v12                     bool
-	v13                     bool
-	v20                     bool
-	v11PvtDataExperimental  bool
-	v14FabTokenExperimental bool
+	v11                    bool
+	v12                    bool
+	v13                    bool
+	v20                    bool
+	v11PvtDataExperimental bool
 }
 
 // NewApplicationProvider creates a application capabilities provider.
@@ -54,7 +51,6 @@ func NewApplicationProvider(capabilities map[string]*cb.Capability) *Application
 	_, ap.v13 = capabilities[ApplicationV1_3]
 	_, ap.v20 = capabilities[ApplicationV2_0]
 	_, ap.v11PvtDataExperimental = capabilities[ApplicationPvtDataExperimental]
-	_, ap.v14FabTokenExperimental = capabilities[ApplicationFabTokenExperimental]
 	return ap
 }
 
@@ -113,9 +109,15 @@ func (ap *ApplicationProvider) V2_0Validation() bool {
 	return ap.v20
 }
 
-// MetadataLifecycle indicates whether the peer should use the deprecated and problematic
-// v1.0/v1.1/v1.2 lifecycle, or whether it should use the newer per channel peer local chaincode
-// metadata package approach planned for release with Fabric v1.3
+// LifecycleV20 indicates whether the peer should use the deprecated and problematic
+// v1.x lifecycle, or whether it should use the newer per channel approve/commit definitions
+// process introduced in v2.0.  Note, this should only be used on the endorsing side
+// of peer processing, so that we may safely remove all checks against it in v2.1.
+func (ap *ApplicationProvider) LifecycleV20() bool {
+	return ap.v20
+}
+
+// MetadataLifecycle always returns false
 func (ap *ApplicationProvider) MetadataLifecycle() bool {
 	return false
 }
@@ -128,7 +130,7 @@ func (ap *ApplicationProvider) KeyLevelEndorsement() bool {
 
 // FabToken returns true if support for fabric token functions is enabled.
 func (ap *ApplicationProvider) FabToken() bool {
-	return ap.v14FabTokenExperimental
+	return ap.v20
 }
 
 // HasCapability returns true if the capability is supported by this binary.
@@ -146,8 +148,6 @@ func (ap *ApplicationProvider) HasCapability(capability string) bool {
 	case ApplicationPvtDataExperimental:
 		return true
 	case ApplicationResourcesTreeExperimental:
-		return true
-	case ApplicationFabTokenExperimental:
 		return true
 	default:
 		return false

@@ -16,26 +16,26 @@ import (
 	_ "net/http/pprof" // This is essentially the main package for the orderer
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-lib-go/healthz"
 	"github.com/hyperledger/fabric/common/channelconfig"
-	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/flogging"
 	floggingmetrics "github.com/hyperledger/fabric/common/flogging/metrics"
 	"github.com/hyperledger/fabric/common/grpclogging"
 	"github.com/hyperledger/fabric/common/grpcmetrics"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
-	"github.com/hyperledger/fabric/common/localmsp"
 	"github.com/hyperledger/fabric/common/metrics"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
-	"github.com/hyperledger/fabric/common/tools/configtxgen/encoder"
-	genesisconfig "github.com/hyperledger/fabric/common/tools/configtxgen/localconfig"
 	"github.com/hyperledger/fabric/common/tools/protolator"
-	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/operations"
+	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
+	genesisconfig "github.com/hyperledger/fabric/internal/configtxgen/localconfig"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/orderer/common/bootstrap/file"
@@ -49,7 +49,7 @@ import (
 	"github.com/hyperledger/fabric/orderer/consensus/solo"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
@@ -97,14 +97,21 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 		logger.Panicf("Failed validating bootstrap block: %v", err)
 	}
 
-	clusterType := isClusterType(bootstrapBlock)
-	signer := localmsp.NewSigner()
-
 	lf, _ := createLedgerFactory(conf)
+	sysChanLastConfigBlock := extractSysChanLastConfig(lf, bootstrapBlock)
+	clusterBootBlock := selectClusterBootBlock(bootstrapBlock, sysChanLastConfigBlock)
 
-	clusterDialer := &cluster.PredicateDialer{}
-	clusterClientConfig := initializeClusterClientConfig(conf)
-	clusterDialer.SetConfig(clusterClientConfig)
+	clusterType := isClusterType(clusterBootBlock)
+
+	signer, signErr := mspmgmt.GetLocalMSP().GetDefaultSigningIdentity()
+	if signErr != nil {
+		logger.Panicf("Failed to get local MSP identity: %s", signErr)
+	}
+
+	clusterClientConfig := initializeClusterClientConfig(conf, clusterType, bootstrapBlock)
+	clusterDialer := &cluster.PredicateDialer{
+		Config: clusterClientConfig,
+	}
 
 	r := createReplicator(lf, bootstrapBlock, conf, clusterClientConfig.SecOpts, signer)
 	// Only clusters that are equipped with a recent config block can replicate.
@@ -124,10 +131,10 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 
 	serverConfig := initializeServerConfig(conf, metricsProvider)
 	grpcServer := initializeGrpcServer(conf, serverConfig)
-	caSupport := &comm.CASupport{
-		AppRootCAsByChain:     make(map[string][][]byte),
-		OrdererRootCAsByChain: make(map[string][][]byte),
-		ClientRootCAs:         serverConfig.SecOpts.ClientRootCAs,
+	caMgr := &caManager{
+		appRootCAsByChain:     make(map[string][][]byte),
+		ordererRootCAsByChain: make(map[string][][]byte),
+		clientRootCAs:         serverConfig.SecOpts.ClientRootCAs,
 	}
 
 	clusterServerConfig := serverConfig
@@ -147,14 +154,17 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 		// only need to do this if mutual TLS is required or if the orderer node is part of a cluster
 		if grpcServer.MutualTLSRequired() || clusterType {
 			logger.Debug("Executing callback to update root CAs")
-			updateTrustedRoots(caSupport, bundle, servers...)
+			caMgr.updateTrustedRoots(bundle, servers...)
 			if clusterType {
-				updateClusterDialer(caSupport, clusterDialer, clusterClientConfig.SecOpts.ServerRootCAs)
+				caMgr.updateClusterDialer(
+					clusterDialer,
+					clusterClientConfig.SecOpts.ServerRootCAs,
+				)
 			}
 		}
 	}
 
-	manager := initializeMultichannelRegistrar(bootstrapBlock, r, clusterDialer, clusterServerConfig, clusterGRPCServer, conf, signer, metricsProvider, lf, tlsCallback)
+	manager := initializeMultichannelRegistrar(clusterBootBlock, r, clusterDialer, clusterServerConfig, clusterGRPCServer, conf, signer, metricsProvider, opsSystem, lf, tlsCallback)
 	mutualTLS := serverConfig.SecOpts.UseTLS && serverConfig.SecOpts.RequireClientCert
 	server := NewServer(manager, metricsProvider, &conf.Debug, conf.General.Authentication.TimeWindow, mutualTLS)
 
@@ -179,12 +189,55 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 	grpcServer.Start()
 }
 
+// Extract system channel last config block
+func extractSysChanLastConfig(lf blockledger.Factory, bootstrapBlock *cb.Block) *cb.Block {
+	// Are we bootstrapping?
+	num := len(lf.ChainIDs())
+	if num == 0 {
+		logger.Info("Bootstrapping because no existing chains")
+		return nil
+	}
+	logger.Infof("Not bootstrapping because of %d existing chains", num)
+
+	systemChannelName, err := protoutil.GetChainIDFromBlock(bootstrapBlock)
+	if err != nil {
+		logger.Panicf("Failed extracting system channel name from bootstrap block: %v", err)
+	}
+	systemChannelLedger, err := lf.GetOrCreate(systemChannelName)
+	if err != nil {
+		logger.Panicf("Failed getting system channel ledger: %v", err)
+	}
+	height := systemChannelLedger.Height()
+	lastConfigBlock := multichannel.ConfigBlock(systemChannelLedger)
+	logger.Infof("System channel: name=%s, height=%d, last config block number=%d",
+		systemChannelName, height, lastConfigBlock.Header.Number)
+	return lastConfigBlock
+}
+
+// Select cluster boot block
+func selectClusterBootBlock(bootstrapBlock, sysChanLastConfig *cb.Block) *cb.Block {
+	if sysChanLastConfig == nil {
+		logger.Debug("Selected bootstrap block, because system channel last config block is nil")
+		return bootstrapBlock
+	}
+
+	if sysChanLastConfig.Header.Number > bootstrapBlock.Header.Number {
+		logger.Infof("Cluster boot block is system channel last config block; Blocks Header.Number system-channel=%d, bootstrap=%d",
+			sysChanLastConfig.Header.Number, bootstrapBlock.Header.Number)
+		return sysChanLastConfig
+	}
+
+	logger.Infof("Cluster boot block is bootstrap (genesis) block; Blocks Header.Number system-channel=%d, bootstrap=%d",
+		sysChanLastConfig.Header.Number, bootstrapBlock.Header.Number)
+	return bootstrapBlock
+}
+
 func createReplicator(
 	lf blockledger.Factory,
 	bootstrapBlock *cb.Block,
 	conf *localconfig.TopLevel,
 	secOpts *comm.SecureOptions,
-	signer crypto.LocalSigner,
+	signer identity.SignerSerializer,
 ) *replicationInitiator {
 	logger := flogging.MustGetLogger("orderer.common.cluster")
 
@@ -197,7 +250,7 @@ func createReplicator(
 		logger:        logger,
 	}
 
-	systemChannelName, err := utils.GetChainIDFromBlock(bootstrapBlock)
+	systemChannelName, err := protoutil.GetChainIDFromBlock(bootstrapBlock)
 	if err != nil {
 		logger.Panicf("Failed extracting system channel name from bootstrap block: %v", err)
 	}
@@ -208,6 +261,7 @@ func createReplicator(
 	verifiersByChannel[systemChannelName] = &cluster.NoopBlockVerifier{}
 
 	vr := &cluster.VerificationRegistry{
+		LoadVerifier:       vl.loadVerifier,
 		Logger:             logger,
 		VerifiersByChannel: verifiersByChannel,
 		VerifierFactory:    &cluster.BlockVerifierAssembler{Logger: logger},
@@ -218,6 +272,7 @@ func createReplicator(
 		onBlockCommit: vr.BlockCommitted,
 	}
 	return &replicationInitiator{
+		registerChain:     vr.RegisterVerifier,
 		verifierRetriever: vr,
 		logger:            logger,
 		secOpts:           secOpts,
@@ -331,7 +386,10 @@ func configureClusterListener(conf *localconfig.TopLevel, generalConf comm.Serve
 	return serverConf, srv
 }
 
-func initializeClusterClientConfig(conf *localconfig.TopLevel) comm.ClientConfig {
+func initializeClusterClientConfig(conf *localconfig.TopLevel, clusterType bool, bootstrapBlock *cb.Block) comm.ClientConfig {
+	if clusterType && !conf.General.TLS.Enabled {
+		logger.Panicf("TLS is required for running ordering nodes of type %s.", consensusType(bootstrapBlock))
+	}
 	cc := comm.ClientConfig{
 		AsyncConnect: true,
 		KaOpts:       comm.DefaultKeepaliveOptions,
@@ -481,7 +539,7 @@ func extractBootstrapBlock(conf *localconfig.TopLevel) *cb.Block {
 }
 
 func initializeBootstrapChannel(genesisBlock *cb.Block, lf blockledger.Factory) {
-	chainID, err := utils.GetChainIDFromBlock(genesisBlock)
+	chainID, err := protoutil.GetChainIDFromBlock(genesisBlock)
 	if err != nil {
 		logger.Fatal("Failed to parse chain ID from genesis block:", err)
 	}
@@ -496,6 +554,11 @@ func initializeBootstrapChannel(genesisBlock *cb.Block, lf blockledger.Factory) 
 }
 
 func isClusterType(genesisBlock *cb.Block) bool {
+	_, exists := clusterTypes[consensusType(genesisBlock)]
+	return exists
+}
+
+func consensusType(genesisBlock *cb.Block) string {
 	if genesisBlock.Data == nil || len(genesisBlock.Data.Data) == 0 {
 		logger.Fatalf("Empty genesis block")
 	}
@@ -511,8 +574,7 @@ func isClusterType(genesisBlock *cb.Block) bool {
 	if !exists {
 		logger.Fatalf("Orderer config doesn't exist in bundle derived from genesis block")
 	}
-	_, exists = clusterTypes[ordConf.ConsensusType()]
-	return exists
+	return ordConf.ConsensusType()
 }
 
 func initializeGrpcServer(conf *localconfig.TopLevel, serverConfig comm.ServerConfig) *comm.GRPCServer {
@@ -538,6 +600,13 @@ func initializeLocalMsp(conf *localconfig.TopLevel) {
 	}
 }
 
+//go:generate counterfeiter -o mocks/health_checker.go -fake-name HealthChecker . healthChecker
+
+// HealthChecker defines the contract for health checker
+type healthChecker interface {
+	RegisterChecker(component string, checker healthz.HealthChecker) error
+}
+
 func initializeMultichannelRegistrar(
 	bootstrapBlock *cb.Block,
 	ri *replicationInitiator,
@@ -545,8 +614,9 @@ func initializeMultichannelRegistrar(
 	srvConf comm.ServerConfig,
 	srv *comm.GRPCServer,
 	conf *localconfig.TopLevel,
-	signer crypto.LocalSigner,
+	signer identity.SignerSerializer,
 	metricsProvider metrics.Provider,
+	healthChecker healthChecker,
 	lf blockledger.Factory,
 	callbacks ...channelconfig.BundleActor,
 ) *multichannel.Registrar {
@@ -564,12 +634,12 @@ func initializeMultichannelRegistrar(
 
 	consenters["solo"] = solo.New()
 	var kafkaMetrics *kafka.Metrics
-	consenters["kafka"], kafkaMetrics = kafka.New(conf.Kafka, metricsProvider)
+	consenters["kafka"], kafkaMetrics = kafka.New(conf.Kafka, metricsProvider, healthChecker)
 	// Note, we pass a 'nil' channel here, we could pass a channel that
 	// closes if we wished to cleanup this routine on exit.
 	go kafkaMetrics.PollGoMetricsUntilStop(time.Minute, nil)
 	if isClusterType(bootstrapBlock) {
-		initializeEtcdraftConsenter(consenters, conf, lf, clusterDialer, bootstrapBlock, ri, srvConf, srv, registrar)
+		initializeEtcdraftConsenter(consenters, conf, lf, clusterDialer, bootstrapBlock, ri, srvConf, srv, registrar, metricsProvider)
 	}
 	registrar.Initialize(consenters)
 	return registrar
@@ -585,13 +655,14 @@ func initializeEtcdraftConsenter(
 	srvConf comm.ServerConfig,
 	srv *comm.GRPCServer,
 	registrar *multichannel.Registrar,
+	metricsProvider metrics.Provider,
 ) {
 	replicationRefreshInterval := conf.General.Cluster.ReplicationBackgroundRefreshInterval
 	if replicationRefreshInterval == 0 {
 		replicationRefreshInterval = defaultReplicationBackgroundRefreshInterval
 	}
 
-	systemChannelName, err := utils.GetChainIDFromBlock(bootstrapBlock)
+	systemChannelName, err := protoutil.GetChainIDFromBlock(bootstrapBlock)
 	if err != nil {
 		ri.logger.Panicf("Failed extracting system channel name from bootstrap block: %v", err)
 	}
@@ -613,6 +684,7 @@ func initializeEtcdraftConsenter(
 		replicator:                        ri,
 		chains2CreationCallbacks:          make(map[string]chainCreation),
 		retrieveLastSysChannelConfigBlock: getConfigBlock,
+		registerChain:                     ri.registerChain,
 	}
 
 	// Use the inactiveChainReplicator as a channel lister, since it has knowledge
@@ -622,7 +694,7 @@ func initializeEtcdraftConsenter(
 	ri.channelLister = icr
 
 	go icr.run()
-	raftConsenter := etcdraft.New(clusterDialer, conf, srvConf, srv, registrar, icr)
+	raftConsenter := etcdraft.New(clusterDialer, conf, srvConf, srv, registrar, icr, metricsProvider)
 	consenters["etcdraft"] = raftConsenter
 }
 
@@ -650,9 +722,20 @@ func newOperationsSystem(ops localconfig.Operations, metrics localconfig.Metrics
 	})
 }
 
-func updateTrustedRoots(rootCASupport *comm.CASupport, cm channelconfig.Resources, servers ...*comm.GRPCServer) {
-	rootCASupport.Lock()
-	defer rootCASupport.Unlock()
+// caMgr manages certificate authorities scoped by channel
+type caManager struct {
+	sync.Mutex
+	appRootCAsByChain     map[string][][]byte
+	ordererRootCAsByChain map[string][][]byte
+	clientRootCAs         [][]byte
+}
+
+func (mgr *caManager) updateTrustedRoots(
+	cm channelconfig.Resources,
+	servers ...*comm.GRPCServer,
+) {
+	mgr.Lock()
+	defer mgr.Unlock()
 
 	appRootCAs := [][]byte{}
 	ordererRootCAs := [][]byte{}
@@ -718,20 +801,20 @@ func updateTrustedRoots(rootCASupport *comm.CASupport, cm channelconfig.Resource
 			}
 		}
 	}
-	rootCASupport.AppRootCAsByChain[cid] = appRootCAs
-	rootCASupport.OrdererRootCAsByChain[cid] = ordererRootCAs
+	mgr.appRootCAsByChain[cid] = appRootCAs
+	mgr.ordererRootCAsByChain[cid] = ordererRootCAs
 
 	// now iterate over all roots for all app and orderer chains
 	trustedRoots := [][]byte{}
-	for _, roots := range rootCASupport.AppRootCAsByChain {
+	for _, roots := range mgr.appRootCAsByChain {
 		trustedRoots = append(trustedRoots, roots...)
 	}
-	for _, roots := range rootCASupport.OrdererRootCAsByChain {
+	for _, roots := range mgr.ordererRootCAsByChain {
 		trustedRoots = append(trustedRoots, roots...)
 	}
 	// also need to append statically configured root certs
-	if len(rootCASupport.ClientRootCAs) > 0 {
-		trustedRoots = append(trustedRoots, rootCASupport.ClientRootCAs...)
+	if len(mgr.clientRootCAs) > 0 {
+		trustedRoots = append(trustedRoots, mgr.clientRootCAs...)
 	}
 
 	// now update the client roots for the gRPC server
@@ -746,27 +829,28 @@ func updateTrustedRoots(rootCASupport *comm.CASupport, cm channelconfig.Resource
 	}
 }
 
-func updateClusterDialer(rootCASupport *comm.CASupport, clusterDialer *cluster.PredicateDialer, localClusterRootCAs [][]byte) {
-	rootCASupport.Lock()
-	defer rootCASupport.Unlock()
+func (mgr *caManager) updateClusterDialer(
+	clusterDialer *cluster.PredicateDialer,
+	localClusterRootCAs [][]byte,
+) {
+	mgr.Lock()
+	defer mgr.Unlock()
 
 	// Iterate over all orderer root CAs for all chains and add them
 	// to the root CAs
 	var clusterRootCAs [][]byte
-	for _, roots := range rootCASupport.OrdererRootCAsByChain {
+	for _, roots := range mgr.ordererRootCAsByChain {
 		clusterRootCAs = append(clusterRootCAs, roots...)
 	}
 
 	// Add the local root CAs too
 	clusterRootCAs = append(clusterRootCAs, localClusterRootCAs...)
 	// Update the cluster config with the new root CAs
-	clusterConfig := clusterDialer.Config.Load().(comm.ClientConfig)
-	clusterConfig.SecOpts.ServerRootCAs = clusterRootCAs
-	clusterDialer.SetConfig(clusterConfig)
+	clusterDialer.UpdateRootCAs(clusterRootCAs)
 }
 
 func prettyPrintStruct(i interface{}) {
-	params := util.Flatten(i)
+	params := localconfig.Flatten(i)
 	var buffer bytes.Buffer
 	for i := range params {
 		buffer.WriteString("\n\t")

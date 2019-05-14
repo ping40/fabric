@@ -19,7 +19,7 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/customtx"
 	"github.com/hyperledger/fabric/core/ledger/kvledger"
 	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -46,6 +46,7 @@ type Initializer struct {
 	MembershipInfoProvider        ledger.MembershipInfoProvider
 	MetricsProvider               metrics.Provider
 	HealthCheckRegistry           ledger.HealthCheckRegistry
+	Config                        *ledger.Config
 }
 
 // Initialize initializes ledgermgmt
@@ -67,17 +68,19 @@ func initialize(initializer *Initializer) {
 		initializer.DeployedChaincodeInfoProvider,
 	})
 	finalStateListeners := addListenerForCCEventsHandler(initializer.DeployedChaincodeInfoProvider, initializer.StateListeners)
-	provider, err := kvledger.NewProvider()
+	provider, err := kvledger.NewProvider(
+		&ledger.Initializer{
+			StateListeners:                finalStateListeners,
+			DeployedChaincodeInfoProvider: initializer.DeployedChaincodeInfoProvider,
+			MembershipInfoProvider:        initializer.MembershipInfoProvider,
+			MetricsProvider:               initializer.MetricsProvider,
+			HealthCheckRegistry:           initializer.HealthCheckRegistry,
+			Config:                        initializer.Config,
+		},
+	)
 	if err != nil {
 		panic(errors.WithMessage(err, "Error in instantiating ledger provider"))
 	}
-	provider.Initialize(&ledger.Initializer{
-		StateListeners:                finalStateListeners,
-		DeployedChaincodeInfoProvider: initializer.DeployedChaincodeInfoProvider,
-		MembershipInfoProvider:        initializer.MembershipInfoProvider,
-		MetricsProvider:               initializer.MetricsProvider,
-		HealthCheckRegistry:           initializer.HealthCheckRegistry,
-	})
 	ledgerProvider = provider
 	logger.Info("ledger mgmt initialized")
 }
@@ -91,7 +94,7 @@ func CreateLedger(genesisBlock *common.Block) (ledger.PeerLedger, error) {
 	if !initialized {
 		return nil, ErrLedgerMgmtNotInitialized
 	}
-	id, err := utils.GetChainIDFromBlock(genesisBlock)
+	id, err := protoutil.GetChainIDFromBlock(genesisBlock)
 	if err != nil {
 		return nil, err
 	}

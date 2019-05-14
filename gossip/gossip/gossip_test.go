@@ -22,13 +22,16 @@ import (
 
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
+	corecomm "github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/comm"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/gossip/discovery"
 	"github.com/hyperledger/fabric/gossip/gossip/algo"
+	"github.com/hyperledger/fabric/gossip/gossip/channel"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/metrics/mocks"
+	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/util"
 	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/stretchr/testify/assert"
@@ -60,11 +63,6 @@ var tests = []func(t *testing.T){
 func init() {
 	util.SetupTestLogging()
 	rand.Seed(int64(time.Now().Second()))
-	aliveTimeInterval := time.Duration(1000) * time.Millisecond
-	discovery.SetAliveTimeInterval(aliveTimeInterval)
-	discovery.SetAliveExpirationCheckInterval(aliveTimeInterval)
-	discovery.SetAliveExpirationTimeout(aliveTimeInterval * 10)
-	discovery.SetReconnectInterval(aliveTimeInterval)
 	discovery.SetMaxConnAttempts(5)
 	for range tests {
 		testWG.Add(1)
@@ -72,7 +70,15 @@ func init() {
 	factory.InitFactories(nil)
 }
 
-var expirationTimes map[string]time.Time = map[string]time.Time{}
+var aliveTimeInterval = 1000 * time.Millisecond
+var discoveryConfig = discovery.DiscoveryConfig{
+	AliveTimeInterval:            aliveTimeInterval,
+	AliveExpirationTimeout:       10 * aliveTimeInterval,
+	AliveExpirationCheckInterval: aliveTimeInterval,
+	ReconnectInterval:            aliveTimeInterval,
+}
+
+var expirationTimes = map[string]time.Time{}
 
 var orgInChannelA = api.OrgIdentityType("ORG1")
 
@@ -85,7 +91,7 @@ func acceptData(m interface{}) bool {
 
 func acceptLeadershp(message interface{}) bool {
 	validMsg := message.(*proto.GossipMessage).Tag == proto.GossipMessage_CHAN_AND_ORG &&
-		message.(*proto.GossipMessage).IsLeadershipMsg()
+		protoext.IsLeadershipMsg(message.(*proto.GossipMessage))
 
 	return validMsg
 }
@@ -124,15 +130,20 @@ func (jcm *joinChanMsg) AnchorPeersOf(org api.OrgIdentityType) []api.AnchorPeer 
 
 type naiveCryptoService struct {
 	sync.RWMutex
-	allowedPkiIDS map[string]struct{}
-	revokedPkiIDS map[string]struct{}
+	allowedPkiIDS       map[string]struct{}
+	revokedPkiIDS       map[string]struct{}
+	expirationTimesLock *sync.RWMutex
 }
 
 func (cs *naiveCryptoService) OrgByPeerIdentity(api.PeerIdentityType) api.OrgIdentityType {
 	return nil
 }
 
-func (*naiveCryptoService) Expiration(peerIdentity api.PeerIdentityType) (time.Time, error) {
+func (cs *naiveCryptoService) Expiration(peerIdentity api.PeerIdentityType) (time.Time, error) {
+	if cs.expirationTimesLock != nil {
+		cs.expirationTimesLock.RLock()
+		defer cs.expirationTimesLock.RUnlock()
+	}
 	if exp, exists := expirationTimes[string(peerIdentity)]; exists {
 		return exp, nil
 	}
@@ -217,105 +228,163 @@ func (cs *naiveCryptoService) revoke(pkiID common.PKIidType) {
 	cs.revokedPkiIDS[string(pkiID)] = struct{}{}
 }
 
-func bootPeers(portPrefix int, ids ...int) []string {
-	peers := []string{}
-	for _, id := range ids {
-		peers = append(peers, fmt.Sprintf("localhost:%d", id+portPrefix))
+func bootPeersWithPorts(ports ...int) []string {
+	var peers []string
+	for _, port := range ports {
+		peers = append(peers, fmt.Sprintf("127.0.0.1:%d", port))
 	}
 	return peers
 }
 
-func newGossipInstanceWithCustomMCS(portPrefix int, id int, maxMsgCount int,
-	mcs api.MessageCryptoService, boot ...int) Gossip {
-	return newGossipInstanceWithCustomMCSWithMetrics(metrics.NewGossipMetrics(&disabled.Provider{}),
-		portPrefix, id, maxMsgCount, mcs, boot...)
-}
+func newGossipInstanceWithGrpcMcsMetrics(id int, port int, gRPCServer *corecomm.GRPCServer, certs *common.TLSCertificates,
+	secureDialOpts api.PeerSecureDialOpts, maxMsgCount int, mcs api.MessageCryptoService,
+	metrics *metrics.GossipMetrics, bootPorts ...int) Gossip {
 
-func newGossipInstanceWithCustomMCSWithMetrics(metrics *metrics.GossipMetrics,
-	portPrefix int, id int, maxMsgCount int,
-	mcs api.MessageCryptoService, boot ...int) Gossip {
-	port := id + portPrefix
 	conf := &Config{
-		BindPort:                   port,
-		BootstrapPeers:             bootPeers(portPrefix, boot...),
-		ID:                         fmt.Sprintf("p%d", id),
-		MaxBlockCountToStore:       maxMsgCount,
-		MaxPropagationBurstLatency: time.Duration(500) * time.Millisecond,
-		MaxPropagationBurstSize:    20,
-		PropagateIterations:        1,
-		PropagatePeerNum:           3,
-		PullInterval:               time.Duration(4) * time.Second,
-		PullPeerNum:                5,
-		InternalEndpoint:           fmt.Sprintf("localhost:%d", port),
-		ExternalEndpoint:           fmt.Sprintf("1.2.3.4:%d", port),
-		PublishCertPeriod:          time.Duration(4) * time.Second,
-		PublishStateInfoInterval:   time.Duration(1) * time.Second,
-		RequestStateInfoInterval:   time.Duration(1) * time.Second,
-		TimeForMembershipTracker:   5 * time.Second,
+		BootstrapPeers:               bootPeersWithPorts(bootPorts...),
+		ID:                           fmt.Sprintf("p%d", id),
+		MaxBlockCountToStore:         maxMsgCount,
+		MaxPropagationBurstLatency:   time.Duration(500) * time.Millisecond,
+		MaxPropagationBurstSize:      20,
+		PropagateIterations:          1,
+		PropagatePeerNum:             3,
+		PullInterval:                 time.Duration(4) * time.Second,
+		PullPeerNum:                  5,
+		InternalEndpoint:             fmt.Sprintf("127.0.0.1:%d", port),
+		ExternalEndpoint:             fmt.Sprintf("1.2.3.4:%d", port),
+		PublishCertPeriod:            time.Duration(4) * time.Second,
+		PublishStateInfoInterval:     time.Duration(1) * time.Second,
+		RequestStateInfoInterval:     time.Duration(1) * time.Second,
+		TimeForMembershipTracker:     5 * time.Second,
+		TLSCerts:                     certs,
+		DigestWaitTime:               algo.DefDigestWaitTime,
+		RequestWaitTime:              algo.DefRequestWaitTime,
+		ResponseWaitTime:             algo.DefResponseWaitTime,
+		DialTimeout:                  comm.DefDialTimeout,
+		ConnTimeout:                  comm.DefConnTimeout,
+		RecvBuffSize:                 comm.DefRecvBuffSize,
+		SendBuffSize:                 comm.DefSendBuffSize,
+		MsgExpirationTimeout:         channel.DefMsgExpirationTimeout,
+		AliveTimeInterval:            discoveryConfig.AliveTimeInterval,
+		AliveExpirationTimeout:       discoveryConfig.AliveExpirationTimeout,
+		AliveExpirationCheckInterval: discoveryConfig.AliveExpirationCheckInterval,
+		ReconnectInterval:            discoveryConfig.ReconnectInterval,
 	}
 	selfID := api.PeerIdentityType(conf.InternalEndpoint)
-	g := NewGossipServiceWithServer(conf, &orgCryptoService{}, mcs,
-		selfID, nil, metrics)
-
-	return g
+	g := NewGossipService(conf, gRPCServer.Server(), &orgCryptoService{}, mcs, selfID,
+		secureDialOpts, metrics)
+	go func() {
+		gRPCServer.Start()
+	}()
+	return &gossipGRPC{gossipServiceImpl: g.(*gossipServiceImpl), grpc: gRPCServer}
 }
 
-func newGossipInstance(portPrefix int, id int, maxMsgCount int, boot ...int) Gossip {
-	return newGossipInstanceWithCustomMCS(portPrefix, id, maxMsgCount, &naiveCryptoService{}, boot...)
+func newGossipInstanceWithGRPC(id int, port int, gRPCServer *corecomm.GRPCServer, certs *common.TLSCertificates,
+	secureDialOpts api.PeerSecureDialOpts, maxMsgCount int, bootPorts ...int) Gossip {
+	metrics := metrics.NewGossipMetrics(&disabled.Provider{})
+	mcs := &naiveCryptoService{}
+	return newGossipInstanceWithGrpcMcsMetrics(id, port, gRPCServer, certs, secureDialOpts, maxMsgCount, mcs, metrics, bootPorts...)
 }
 
-func newGossipInstanceWithMetrics(metrics *metrics.GossipMetrics,
-	portPrefix int, id int, maxMsgCount int, boot ...int) Gossip {
-	return newGossipInstanceWithCustomMCSWithMetrics(metrics,
-		portPrefix, id, maxMsgCount, &naiveCryptoService{}, boot...)
+func newGossipInstanceWithGRPCWithLock(lock *sync.RWMutex, id int, port int, gRPCServer *corecomm.GRPCServer, certs *common.TLSCertificates,
+	secureDialOpts api.PeerSecureDialOpts, maxMsgCount int, bootPorts ...int) Gossip {
+	metrics := metrics.NewGossipMetrics(&disabled.Provider{})
+	mcs := &naiveCryptoService{expirationTimesLock: lock}
+	return newGossipInstanceWithGrpcMcsMetrics(id, port, gRPCServer, certs, secureDialOpts, maxMsgCount, mcs, metrics, bootPorts...)
 }
 
-func newGossipInstanceWithOnlyPull(portPrefix int, id int, maxMsgCount int, boot ...int) Gossip {
-	port := id + portPrefix
+func newGossipInstanceWithGRPCWithOnlyPull(id int, port int, gRPCServer *corecomm.GRPCServer, certs *common.TLSCertificates,
+	secureDialOpts api.PeerSecureDialOpts, maxMsgCount int, mcs api.MessageCryptoService,
+	metrics *metrics.GossipMetrics, bootPorts ...int) Gossip {
+	shortenedWaitTime := time.Duration(200) * time.Millisecond
 	conf := &Config{
-		BindPort:                   port,
-		BootstrapPeers:             bootPeers(portPrefix, boot...),
-		ID:                         fmt.Sprintf("p%d", id),
-		MaxBlockCountToStore:       maxMsgCount,
-		MaxPropagationBurstLatency: time.Duration(1000) * time.Millisecond,
-		MaxPropagationBurstSize:    10,
-		PropagateIterations:        0,
-		PropagatePeerNum:           0,
-		PullInterval:               time.Duration(1000) * time.Millisecond,
-		PullPeerNum:                20,
-		InternalEndpoint:           fmt.Sprintf("localhost:%d", port),
-		ExternalEndpoint:           fmt.Sprintf("1.2.3.4:%d", port),
-		PublishCertPeriod:          time.Duration(0) * time.Second,
-		PublishStateInfoInterval:   time.Duration(1) * time.Second,
-		RequestStateInfoInterval:   time.Duration(1) * time.Second,
-		TimeForMembershipTracker:   5 * time.Second,
+		BootstrapPeers:               bootPeersWithPorts(bootPorts...),
+		ID:                           fmt.Sprintf("p%d", id),
+		MaxBlockCountToStore:         maxMsgCount,
+		MaxPropagationBurstLatency:   time.Duration(1000) * time.Millisecond,
+		MaxPropagationBurstSize:      10,
+		PropagateIterations:          0,
+		PropagatePeerNum:             0,
+		PullInterval:                 time.Duration(1000) * time.Millisecond,
+		PullPeerNum:                  20,
+		InternalEndpoint:             fmt.Sprintf("127.0.0.1:%d", port),
+		ExternalEndpoint:             fmt.Sprintf("1.2.3.4:%d", port),
+		PublishCertPeriod:            time.Duration(0) * time.Second,
+		PublishStateInfoInterval:     time.Duration(1) * time.Second,
+		RequestStateInfoInterval:     time.Duration(1) * time.Second,
+		TimeForMembershipTracker:     5 * time.Second,
+		TLSCerts:                     certs,
+		DigestWaitTime:               shortenedWaitTime,
+		RequestWaitTime:              shortenedWaitTime,
+		ResponseWaitTime:             shortenedWaitTime,
+		DialTimeout:                  comm.DefDialTimeout,
+		ConnTimeout:                  comm.DefConnTimeout,
+		RecvBuffSize:                 comm.DefRecvBuffSize,
+		SendBuffSize:                 comm.DefSendBuffSize,
+		MsgExpirationTimeout:         channel.DefMsgExpirationTimeout,
+		AliveTimeInterval:            discoveryConfig.AliveTimeInterval,
+		AliveExpirationTimeout:       discoveryConfig.AliveExpirationTimeout,
+		AliveExpirationCheckInterval: discoveryConfig.AliveExpirationCheckInterval,
+		ReconnectInterval:            discoveryConfig.ReconnectInterval,
 	}
-
-	cryptoService := &naiveCryptoService{}
 	selfID := api.PeerIdentityType(conf.InternalEndpoint)
-	g := NewGossipServiceWithServer(conf, &orgCryptoService{}, cryptoService,
-		selfID, nil, metrics.NewGossipMetrics(&disabled.Provider{}))
-	return g
+	g := NewGossipService(conf, gRPCServer.Server(), &orgCryptoService{}, mcs, selfID,
+		secureDialOpts, metrics)
+	go func() {
+		gRPCServer.Start()
+	}()
+	return &gossipGRPC{gossipServiceImpl: g.(*gossipServiceImpl), grpc: gRPCServer}
+}
+
+func newGossipInstanceCreateGRPCWithMCSWithMetrics(id int, maxMsgCount int, mcs api.MessageCryptoService,
+	metrics *metrics.GossipMetrics, bootPorts ...int) Gossip {
+	p, g, c, s, _ := util.CreateGRPCLayer()
+	return newGossipInstanceWithGrpcMcsMetrics(id, p, g, c, s, maxMsgCount, mcs, metrics, bootPorts...)
+}
+
+func newGossipInstanceCreateGRPC(id int, maxMsgCount int, bootPorts ...int) Gossip {
+	metrics := metrics.NewGossipMetrics(&disabled.Provider{})
+	mcs := &naiveCryptoService{}
+	return newGossipInstanceCreateGRPCWithMCSWithMetrics(id, maxMsgCount, mcs, metrics, bootPorts...)
+}
+
+func newGossipInstanceCreateGRPCWithOnlyPull(id int, maxMsgCount int, mcs api.MessageCryptoService,
+	metrics *metrics.GossipMetrics, bootPorts ...int) Gossip {
+	p, g, c, s, _ := util.CreateGRPCLayer()
+	return newGossipInstanceWithGRPCWithOnlyPull(id, p, g, c, s, maxMsgCount, mcs, metrics, bootPorts...)
+}
+
+type gossipGRPC struct {
+	*gossipServiceImpl
+	grpc *corecomm.GRPCServer
+}
+
+func (g *gossipGRPC) Stop() {
+	g.gossipServiceImpl.Stop()
+	g.grpc.Stop()
 }
 
 func TestLeaveChannel(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 4500
 	// Scenario: Have 3 peers in a channel and make one of them leave it.
 	// Ensure the peers don't recognize the other peer when it left the channel
 
-	p0 := newGossipInstance(portPrefix, 0, 100, 2)
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	port1, grpc1, certs1, secDialOpts1, _ := util.CreateGRPCLayer()
+	port2, grpc2, certs2, secDialOpts2, _ := util.CreateGRPCLayer()
+
+	p0 := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100, port2)
 	p0.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	p0.UpdateLedgerHeight(1, common.ChainID("A"))
 	defer p0.Stop()
 
-	p1 := newGossipInstance(portPrefix, 1, 100, 0)
+	p1 := newGossipInstanceWithGRPC(1, port1, grpc1, certs1, secDialOpts1, 100, port0)
 	p1.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	p1.UpdateLedgerHeight(1, common.ChainID("A"))
 	defer p1.Stop()
 
-	p2 := newGossipInstance(portPrefix, 2, 100, 1)
+	p2 := newGossipInstanceWithGRPC(2, port2, grpc2, certs2, secDialOpts2, 100, port1)
 	p2.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	p2.UpdateLedgerHeight(1, common.ChainID("A"))
 	defer p2.Stop()
@@ -345,22 +414,10 @@ func TestLeaveChannel(t *testing.T) {
 func TestPull(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 5610
 	t1 := time.Now()
 	// Scenario: Turn off forwarding and use only pull-based gossip.
 	// First phase: Ensure full membership view for all nodes
 	// Second phase: Disseminate 10 messages and ensure all nodes got them
-
-	shortenedWaitTime := time.Duration(200) * time.Millisecond
-	algo.SetDigestWaitTime(shortenedWaitTime)
-	algo.SetRequestWaitTime(shortenedWaitTime)
-	algo.SetResponseWaitTime(shortenedWaitTime)
-
-	defer func() {
-		algo.SetDigestWaitTime(time.Duration(1) * time.Second)
-		algo.SetRequestWaitTime(time.Duration(1) * time.Second)
-		algo.SetResponseWaitTime(time.Duration(2) * time.Second)
-	}()
 
 	stopped := int32(0)
 	go waitForTestCompletion(&stopped, t)
@@ -368,13 +425,17 @@ func TestPull(t *testing.T) {
 	n := 5
 	msgsCount2Send := 10
 
+	metrics := metrics.NewGossipMetrics(&disabled.Provider{})
+	mcs := &naiveCryptoService{}
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+
 	peers := make([]Gossip, n)
 	wg := sync.WaitGroup{}
 	wg.Add(n)
 	for i := 1; i <= n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			pI := newGossipInstanceWithOnlyPull(portPrefix, i, 100, 0)
+			pI := newGossipInstanceCreateGRPCWithOnlyPull(i, 100, mcs, metrics, port0)
 			pI.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 			pI.UpdateLedgerHeight(1, common.ChainID("A"))
 			peers[i-1] = pI
@@ -384,7 +445,7 @@ func TestPull(t *testing.T) {
 
 	time.Sleep(time.Second)
 
-	boot := newGossipInstanceWithOnlyPull(portPrefix, 0, 100)
+	boot := newGossipInstanceWithGRPCWithOnlyPull(0, port0, grpc0, certs0, secDialOpts0, 100, mcs, metrics)
 	boot.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	boot.UpdateLedgerHeight(1, common.ChainID("A"))
 
@@ -450,7 +511,6 @@ func TestConnectToAnchorPeers(t *testing.T) {
 	// Wait 5 seconds, and then spawn a random anchor peer out of the 3.
 	// Ensure that all peers successfully see each other in the channel
 
-	portPrefix := 8610
 	// Scenario: Spawn 5 peers, and make each of them connect to
 	// the other 2 using join channel.
 	stopped := int32(0)
@@ -458,21 +518,24 @@ func TestConnectToAnchorPeers(t *testing.T) {
 	n := 10
 	anchorPeercount := 3
 
+	var ports []int
+	var grpcs []*corecomm.GRPCServer
+	var certs []*common.TLSCertificates
+	var secDialOpts []api.PeerSecureDialOpts
+
 	jcm := &joinChanMsg{members2AnchorPeers: map[string][]api.AnchorPeer{string(orgInChannelA): {}}}
 	for i := 0; i < anchorPeercount; i++ {
+		port, grpc, cert, secDialOpt, _ := util.CreateGRPCLayer()
+		ports = append(ports, port)
+		grpcs = append(grpcs, grpc)
+		certs = append(certs, cert)
+		secDialOpts = append(secDialOpts, secDialOpt)
 		ap := api.AnchorPeer{
-			Port: portPrefix + i,
-			Host: "localhost",
+			Port: port,
+			Host: "127.0.0.1",
 		}
 		jcm.members2AnchorPeers[string(orgInChannelA)] = append(jcm.members2AnchorPeers[string(orgInChannelA)], ap)
 	}
-
-	// Start a random anchor peer
-	anchorPeer := newGossipInstance(portPrefix, rand.Intn(anchorPeercount), 100)
-	anchorPeer.JoinChan(jcm, common.ChainID("A"))
-	anchorPeer.UpdateLedgerHeight(1, common.ChainID("A"))
-
-	defer anchorPeer.Stop()
 
 	// Start peers
 	peers := make([]Gossip, n)
@@ -480,7 +543,7 @@ func TestConnectToAnchorPeers(t *testing.T) {
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func(i int) {
-			peers[i] = newGossipInstance(portPrefix, i+anchorPeercount, 100)
+			peers[i] = newGossipInstanceCreateGRPC(i+anchorPeercount, 100)
 			peers[i].JoinChan(jcm, common.ChainID("A"))
 			peers[i].UpdateLedgerHeight(1, common.ChainID("A"))
 			wg.Done()
@@ -489,6 +552,13 @@ func TestConnectToAnchorPeers(t *testing.T) {
 
 	waitUntilOrFailBlocking(t, wg.Wait, "waiting until all peers join the channel")
 
+	// Now start a random anchor peer
+	index := rand.Intn(anchorPeercount)
+	anchorPeer := newGossipInstanceWithGRPC(index, ports[index], grpcs[index], certs[index], secDialOpts[index], 100)
+	anchorPeer.JoinChan(jcm, common.ChainID("A"))
+	anchorPeer.UpdateLedgerHeight(1, common.ChainID("A"))
+
+	defer anchorPeer.Stop()
 	waitUntilOrFail(t, checkPeersMembership(t, peers, n), "waiting for peers to form membership view")
 
 	channelMembership := func() bool {
@@ -514,7 +584,6 @@ func TestConnectToAnchorPeers(t *testing.T) {
 func TestMembership(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 4610
 	t1 := time.Now()
 	// Scenario: spawn 20 nodes and a single bootstrap node and then:
 	// 1) Check full membership views for all nodes but the bootstrap node.
@@ -524,23 +593,31 @@ func TestMembership(t *testing.T) {
 	go waitForTestCompletion(&stopped, t)
 
 	n := 10
-	var lastPeer = fmt.Sprintf("localhost:%d", n+portPrefix)
-	boot := newGossipInstance(portPrefix, 0, 100)
+
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	boot := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100)
 	boot.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	boot.UpdateLedgerHeight(1, common.ChainID("A"))
 
 	peers := make([]Gossip, n)
 	wg := sync.WaitGroup{}
-	wg.Add(n)
-	for i := 1; i <= n; i++ {
+	wg.Add(n - 1)
+	for i := 1; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			pI := newGossipInstance(portPrefix, i, 100, 0)
+			pI := newGossipInstanceCreateGRPC(i, 100, port0)
 			peers[i-1] = pI
 			pI.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 			pI.UpdateLedgerHeight(1, common.ChainID("A"))
 		}(i)
 	}
+
+	portn, grpcn, certsn, secDialOptsn, _ := util.CreateGRPCLayer()
+	var lastPeer = fmt.Sprintf("127.0.0.1:%d", portn)
+	pI := newGossipInstanceWithGRPC(0, portn, grpcn, certsn, secDialOptsn, 100, port0)
+	peers[n-1] = pI
+	pI.JoinChan(&joinChanMsg{}, common.ChainID("A"))
+	pI.UpdateLedgerHeight(1, common.ChainID("A"))
 
 	waitUntilOrFailBlocking(t, wg.Wait, "waiting for all peers to join the channel")
 	t.Log("Peers started")
@@ -596,20 +673,20 @@ func TestMembership(t *testing.T) {
 func TestNoMessagesSelfLoop(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 17610
 
-	boot := newGossipInstance(portPrefix, 0, 100)
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	boot := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100)
 	boot.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	boot.UpdateLedgerHeight(1, common.ChainID("A"))
 
-	peer := newGossipInstance(portPrefix, 1, 100, 0)
+	peer := newGossipInstanceCreateGRPC(1, 100, port0)
 	peer.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	peer.UpdateLedgerHeight(1, common.ChainID("A"))
 
 	// Wait until both peers get connected
 	waitUntilOrFail(t, checkPeersMembership(t, []Gossip{peer}, 1), "waiting for peers to form membership view")
 	_, commCh := boot.Accept(func(msg interface{}) bool {
-		return msg.(proto.ReceivedMessage).GetGossipMessage().IsDataMsg()
+		return protoext.IsDataMsg(msg.(protoext.ReceivedMessage).GetGossipMessage().GossipMessage)
 	}, true)
 
 	wg := sync.WaitGroup{}
@@ -617,13 +694,13 @@ func TestNoMessagesSelfLoop(t *testing.T) {
 
 	// Make sure sending peer is not getting his own
 	// message back
-	go func(ch <-chan proto.ReceivedMessage) {
+	go func(ch <-chan protoext.ReceivedMessage) {
 		defer wg.Done()
 		for {
 			select {
 			case msg := <-ch:
 				{
-					if msg.GetGossipMessage().IsDataMsg() {
+					if protoext.IsDataMsg(msg.GetGossipMessage().GossipMessage) {
 						t.Fatal("Should not receive data message back, got", msg)
 					}
 				}
@@ -658,7 +735,6 @@ func TestNoMessagesSelfLoop(t *testing.T) {
 func TestDissemination(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 3610
 	t1 := time.Now()
 	// Scenario: 20 nodes and a bootstrap node.
 	// The bootstrap node sends 10 messages and we count
@@ -669,7 +745,9 @@ func TestDissemination(t *testing.T) {
 
 	n := 10
 	msgsCount2Send := 10
-	boot := newGossipInstance(portPrefix, 0, 100)
+
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	boot := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100)
 	boot.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	boot.UpdateLedgerHeight(1, common.ChainID("A"))
 	boot.UpdateChaincodes([]*proto.Chaincode{{Name: "exampleCC", Version: "1.2"}}, common.ChainID("A"))
@@ -678,8 +756,14 @@ func TestDissemination(t *testing.T) {
 	receivedMessages := make([]int, n)
 	wg := sync.WaitGroup{}
 	wg.Add(n)
+	portn, grpcn, certsn, secDialOptsn, _ := util.CreateGRPCLayer()
 	for i := 1; i <= n; i++ {
-		pI := newGossipInstance(portPrefix, i, 100, 0)
+		var pI Gossip
+		if i == n {
+			pI = newGossipInstanceWithGRPC(i, portn, grpcn, certsn, secDialOptsn, 100, port0)
+		} else {
+			pI = newGossipInstanceCreateGRPC(i, 100, port0)
+		}
 		peers[i-1] = pI
 		pI.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 		pI.UpdateLedgerHeight(1, common.ChainID("A"))
@@ -697,7 +781,7 @@ func TestDissemination(t *testing.T) {
 			pI.UpdateLedgerHeight(2, common.ChainID("A"))
 		}
 	}
-	var lastPeer = fmt.Sprintf("localhost:%d", n+portPrefix)
+	var lastPeer = fmt.Sprintf("127.0.0.1:%d", portn)
 	metaDataUpdated := func() bool {
 		if 2 != heightOfPeer(boot.PeersOfChannel(common.ChainID("A")), lastPeer) {
 			return false
@@ -757,7 +841,7 @@ func TestDissemination(t *testing.T) {
 	incTime := uint64(time.Now().UnixNano())
 	t3 := time.Now()
 
-	leadershipMsg := createLeadershipMsg(true, common.ChainID("A"), incTime, uint64(seqNum), boot.(*gossipServiceImpl).comm.GetPKIid())
+	leadershipMsg := createLeadershipMsg(true, common.ChainID("A"), incTime, uint64(seqNum), boot.(*gossipGRPC).gossipServiceImpl.comm.GetPKIid())
 	boot.Gossip(leadershipMsg)
 
 	waitUntilOrFailBlocking(t, wgLeadership.Wait, "waiting to get all leadership messages")
@@ -784,7 +868,6 @@ func TestDissemination(t *testing.T) {
 func TestMembershipConvergence(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 2610
 	// Scenario: Spawn 12 nodes and 3 bootstrap peers
 	// but assign each node to its bootstrap peer group modulo 3.
 	// Then:
@@ -799,23 +882,30 @@ func TestMembershipConvergence(t *testing.T) {
 
 	stopped := int32(0)
 	go waitForTestCompletion(&stopped, t)
-	boot0 := newGossipInstance(portPrefix, 0, 100)
-	boot1 := newGossipInstance(portPrefix, 1, 100)
-	boot2 := newGossipInstance(portPrefix, 2, 100)
+
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	port1, grpc1, certs1, secDialOpts1, _ := util.CreateGRPCLayer()
+	port2, grpc2, certs2, secDialOpts2, _ := util.CreateGRPCLayer()
+	boot0 := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100)
+	boot1 := newGossipInstanceWithGRPC(1, port1, grpc1, certs1, secDialOpts1, 100)
+	boot2 := newGossipInstanceWithGRPC(2, port2, grpc2, certs2, secDialOpts2, 100)
+	ports := []int{port0, port1, port2}
 
 	peers := []Gossip{boot0, boot1, boot2}
 	// 0: {3, 6, 9, 12}
 	// 1: {4, 7, 10, 13}
 	// 2: {5, 8, 11, 14}
 	for i := 3; i < 15; i++ {
-		pI := newGossipInstance(portPrefix, i, 100, i%3)
+		pI := newGossipInstanceCreateGRPC(i, 100, ports[i%3])
 		peers = append(peers, pI)
 	}
 
 	waitUntilOrFail(t, checkPeersMembership(t, peers, 4), "waiting for all instance to form membership")
 	t.Log("Sets of peers connected successfully")
 
-	connectorPeer := newGossipInstance(portPrefix, 15, 100, 0, 1, 2)
+	port15, grpc15, certs15, secDialOpts15, _ := util.CreateGRPCLayer()
+	connectorPeer := newGossipInstanceWithGRPC(15, port15, grpc15, certs15, secDialOpts15, 100, ports...)
+	endpoint15 := fmt.Sprintf("127.0.0.1:%d", port15)
 	connectorPeer.UpdateMetadata([]byte("Connector"))
 
 	fullKnowledge := func() bool {
@@ -823,7 +913,7 @@ func TestMembershipConvergence(t *testing.T) {
 			if 15 != len(peers[i].Peers()) {
 				return false
 			}
-			if "Connector" != string(metadataOfPeer(peers[i].Peers(), "localhost:2625")) {
+			if "Connector" != string(metadataOfPeer(peers[i].Peers(), endpoint15)) {
 				return false
 			}
 		}
@@ -848,7 +938,9 @@ func TestMembershipConvergence(t *testing.T) {
 
 	waitUntilOrFail(t, ensureForget, "waiting to ensure we evicted stopped connector")
 
-	connectorPeer = newGossipInstance(portPrefix, 15, 100)
+	port15, grpc15, certs15, secDialOpts15, _ = util.CreateGRPCLayer()
+	connectorPeer = newGossipInstanceWithGRPC(15, port15, grpc15, certs15, secDialOpts15, 100, ports...)
+	endpoint15 = fmt.Sprintf("127.0.0.1:%d", port15)
 	connectorPeer.UpdateMetadata([]byte("Connector2"))
 	t.Log("Started connector")
 
@@ -857,7 +949,7 @@ func TestMembershipConvergence(t *testing.T) {
 			if 15 != len(peers[i].Peers()) {
 				return false
 			}
-			if "Connector2" != string(metadataOfPeer(peers[i].Peers(), "localhost:2625")) {
+			if "Connector2" != string(metadataOfPeer(peers[i].Peers(), endpoint15)) {
 				return false
 			}
 		}
@@ -887,39 +979,44 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 	// Expected output: g1 should *NOT* respond to g2,
 	// However, g1 should respond to g3 when it sends the message itself.
 
-	portPrefix := 2000
-	g1 := newGossipInstance(portPrefix, 0, 100)
-	g2 := newGossipInstance(portPrefix, 1, 100, 2)
-	g3 := newGossipInstance(portPrefix, 2, 100, 1)
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	port1, grpc1, certs1, secDialOpts1, _ := util.CreateGRPCLayer()
+	port2, grpc2, certs2, secDialOpts2, _ := util.CreateGRPCLayer()
+	g1 := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100)
+	g2 := newGossipInstanceWithGRPC(1, port1, grpc1, certs1, secDialOpts1, 100, port2)
+	g3 := newGossipInstanceWithGRPC(2, port2, grpc2, certs2, secDialOpts2, 100, port1)
 	defer g1.Stop()
 	defer g2.Stop()
 	defer g3.Stop()
+
+	endpoint0 := fmt.Sprintf("127.0.0.1:%d", port0)
+	endpoint2 := fmt.Sprintf("127.0.0.1:%d", port2)
 
 	// Wait for g2 and g3 to know about each other
 	waitUntilOrFail(t, checkPeersMembership(t, []Gossip{g2, g3}, 1), "wait for g2 and g3 to know about each other")
 	// Obtain an alive message from p3
 	_, aliveMsgChan := g2.Accept(func(o interface{}) bool {
-		msg := o.(proto.ReceivedMessage).GetGossipMessage()
+		msg := o.(protoext.ReceivedMessage).GetGossipMessage()
 		// Make sure we get an AliveMessage and it's about g3
-		return msg.IsAliveMsg() && bytes.Equal(msg.GetAliveMsg().Membership.PkiId, []byte("localhost:2002"))
+		return protoext.IsAliveMsg(msg.GossipMessage) && bytes.Equal(msg.GetAliveMsg().Membership.PkiId, []byte(endpoint2))
 	}, true)
 	aliveMsg := <-aliveMsgChan
 
 	// Obtain channel for messages from g1 to g2
 	_, g1ToG2 := g2.Accept(func(o interface{}) bool {
-		connInfo := o.(proto.ReceivedMessage).GetConnectionInfo()
-		return bytes.Equal([]byte("localhost:2000"), connInfo.ID)
+		connInfo := o.(protoext.ReceivedMessage).GetConnectionInfo()
+		return bytes.Equal([]byte(endpoint0), connInfo.ID)
 	}, true)
 
 	// Obtain channel for messages from g1 to g3
 	_, g1ToG3 := g3.Accept(func(o interface{}) bool {
-		connInfo := o.(proto.ReceivedMessage).GetConnectionInfo()
-		return bytes.Equal([]byte("localhost:2000"), connInfo.ID)
+		connInfo := o.(protoext.ReceivedMessage).GetConnectionInfo()
+		return bytes.Equal([]byte(endpoint0), connInfo.ID)
 	}, true)
 
 	// Now, create a membership request message
-	memRequestSpoofFactory := func(aliveMsgEnv *proto.Envelope) *proto.SignedGossipMessage {
-		sMsg, _ := (&proto.GossipMessage{
+	memRequestSpoofFactory := func(aliveMsgEnv *proto.Envelope) *protoext.SignedGossipMessage {
+		sMsg, _ := protoext.NoopSign(&proto.GossipMessage{
 			Tag:   proto.GossipMessage_EMPTY,
 			Nonce: uint64(0),
 			Content: &proto.GossipMessage_MemReq{
@@ -928,11 +1025,11 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 					Known:           [][]byte{},
 				},
 			},
-		}).NoopSign()
+		})
 		return sMsg
 	}
 	spoofedMemReq := memRequestSpoofFactory(aliveMsg.GetSourceEnvelope())
-	g2.Send(spoofedMemReq.GossipMessage, &comm.RemotePeer{Endpoint: "localhost:2000", PKIID: common.PKIidType("localhost:2000")})
+	g2.Send(spoofedMemReq.GossipMessage, &comm.RemotePeer{Endpoint: endpoint0, PKIID: common.PKIidType(endpoint0)})
 	select {
 	case <-time.After(time.Second):
 		break
@@ -941,7 +1038,7 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 	}
 
 	// Now send the same message from g3 to g1
-	g3.Send(spoofedMemReq.GossipMessage, &comm.RemotePeer{Endpoint: "localhost:2000", PKIID: common.PKIidType("localhost:2000")})
+	g3.Send(spoofedMemReq.GossipMessage, &comm.RemotePeer{Endpoint: endpoint0, PKIID: common.PKIidType(endpoint0)})
 	select {
 	case <-time.After(time.Second):
 		assert.Fail(t, "Didn't receive a message back from g1 on time")
@@ -953,7 +1050,6 @@ func TestMembershipRequestSpoofing(t *testing.T) {
 func TestDataLeakage(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
-	portPrefix := 1610
 	// Scenario: spawn some nodes and let them all
 	// establish full membership.
 	// Then, have half be in channel A and half be in channel B.
@@ -963,34 +1059,50 @@ func TestDataLeakage(t *testing.T) {
 	// are eligible for the channels.
 
 	totalPeers := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9} // THIS MUST BE EVEN AND NOT ODD
+	n := len(totalPeers)
 	// Peer0 and Peer5 disseminate blocks
 	// only 1,2 and 6,7 should get blocks.
 
+	var ports []int
+	var grpcs []*corecomm.GRPCServer
+	var certs []*common.TLSCertificates
+	var secDialOpts []api.PeerSecureDialOpts
+	var endpoints []string
+
+	for i := 0; i < n; i++ {
+		port, grpc, cert, secDialOpt, _ := util.CreateGRPCLayer()
+		ports = append(ports, port)
+		grpcs = append(grpcs, grpc)
+		certs = append(certs, cert)
+		secDialOpts = append(secDialOpts, secDialOpt)
+		endpoints = append(endpoints, fmt.Sprintf("127.0.0.1:%d", port))
+	}
+
+	metrics := metrics.NewGossipMetrics(&disabled.Provider{})
 	mcs := &naiveCryptoService{
 		allowedPkiIDS: map[string]struct{}{
 			// Channel A
-			"localhost:1610": {},
-			"localhost:1611": {},
-			"localhost:1612": {},
+			endpoints[0]: {},
+			endpoints[1]: {},
+			endpoints[2]: {},
 			// Channel B
-			"localhost:1615": {},
-			"localhost:1616": {},
-			"localhost:1617": {},
+			endpoints[5]: {},
+			endpoints[6]: {},
+			endpoints[7]: {},
 		},
 	}
 
 	stopped := int32(0)
 	go waitForTestCompletion(&stopped, t)
 
-	n := len(totalPeers)
 	peers := make([]Gossip, n)
 	wg := sync.WaitGroup{}
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
-			totPeers := append([]int(nil), totalPeers[:i]...)
-			bootPeers := append(totPeers, totalPeers[i+1:]...)
-			peers[i] = newGossipInstanceWithCustomMCS(portPrefix, i, 100, mcs, bootPeers...)
+			totPeers := append([]int(nil), ports[:i]...)
+			bootPeers := append(totPeers, ports[i+1:]...)
+			peers[i] = newGossipInstanceWithGrpcMcsMetrics(i, ports[i], grpcs[i], certs[i], secDialOpts[i], 100, mcs, metrics, bootPeers...)
 			wg.Done()
 		}(i)
 	}
@@ -1081,7 +1193,6 @@ func TestDisseminateAll2All(t *testing.T) {
 
 	t.Skip()
 	t.Parallel()
-	portPrefix := 6610
 	stopped := int32(0)
 	go waitForTestCompletion(&stopped, t)
 
@@ -1090,12 +1201,25 @@ func TestDisseminateAll2All(t *testing.T) {
 	peers := make([]Gossip, n)
 	wg := sync.WaitGroup{}
 
+	var ports []int
+	var grpcs []*corecomm.GRPCServer
+	var certs []*common.TLSCertificates
+	var secDialOpts []api.PeerSecureDialOpts
+
+	for i := 0; i < n; i++ {
+		port, grpc, cert, secDialOpt, _ := util.CreateGRPCLayer()
+		ports = append(ports, port)
+		grpcs = append(grpcs, grpc)
+		certs = append(certs, cert)
+		secDialOpts = append(secDialOpts, secDialOpt)
+	}
+
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
-			totPeers := append([]int(nil), totalPeers[:i]...)
-			bootPeers := append(totPeers, totalPeers[i+1:]...)
-			pI := newGossipInstance(portPrefix, i, 100, bootPeers...)
+			totPeers := append([]int(nil), ports[:i]...)
+			bootPeers := append(totPeers, ports[i+1:]...)
+			pI := newGossipInstanceWithGRPC(i, ports[i], grpcs[i], certs[i], secDialOpts[i], 100, bootPeers...)
 			pI.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 			pI.UpdateLedgerHeight(1, common.ChainID("A"))
 			peers[i] = pI
@@ -1149,18 +1273,22 @@ func TestSendByCriteria(t *testing.T) {
 	t.Parallel()
 	defer testWG.Done()
 
-	portPrefix := 20000
-	g1 := newGossipInstance(portPrefix, 0, 100)
-	g2 := newGossipInstance(portPrefix, 1, 100, 0)
-	g3 := newGossipInstance(portPrefix, 2, 100, 0)
-	g4 := newGossipInstance(portPrefix, 3, 100, 0)
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	g1 := newGossipInstanceWithGRPC(0, port0, grpc0, certs0, secDialOpts0, 100)
+	port1, grpc1, certs1, secDialOpts1, _ := util.CreateGRPCLayer()
+	g2 := newGossipInstanceWithGRPC(1, port1, grpc1, certs1, secDialOpts1, 100, port0)
+	port2, grpc2, certs2, secDialOpts2, _ := util.CreateGRPCLayer()
+	g3 := newGossipInstanceWithGRPC(2, port2, grpc2, certs2, secDialOpts2, 100, port0)
+	port3, grpc3, certs3, secDialOpts3, _ := util.CreateGRPCLayer()
+	g4 := newGossipInstanceWithGRPC(3, port3, grpc3, certs3, secDialOpts3, 100, port0)
+
 	peers := []Gossip{g1, g2, g3, g4}
 	for _, p := range peers {
 		p.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 		p.UpdateLedgerHeight(1, common.ChainID("A"))
 	}
 	defer stopPeers(peers)
-	msg, _ := createDataMsg(1, []byte{}, common.ChainID("A")).NoopSign()
+	msg, _ := protoext.NoopSign(createDataMsg(1, []byte{}, common.ChainID("A")))
 
 	// We send without specifying maximum peers,
 	// which sets it to the zero value, and
@@ -1217,12 +1345,12 @@ func TestSendByCriteria(t *testing.T) {
 	// We retry the test above, but this time the peers acknowledge
 	// Peers now ack
 	acceptDataMsgs := func(m interface{}) bool {
-		return m.(proto.ReceivedMessage).GetGossipMessage().IsDataMsg()
+		return protoext.IsDataMsg(m.(protoext.ReceivedMessage).GetGossipMessage().GossipMessage)
 	}
 	_, ackChan2 := g2.Accept(acceptDataMsgs, true)
 	_, ackChan3 := g3.Accept(acceptDataMsgs, true)
 	_, ackChan4 := g4.Accept(acceptDataMsgs, true)
-	ack := func(c <-chan proto.ReceivedMessage) {
+	ack := func(c <-chan protoext.ReceivedMessage) {
 		msg := <-c
 		msg.Ack(nil)
 	}
@@ -1234,7 +1362,7 @@ func TestSendByCriteria(t *testing.T) {
 	assert.NoError(t, err)
 
 	// We send to 3 peers, but 2 out of 3 peers acknowledge with an error
-	nack := func(c <-chan proto.ReceivedMessage) {
+	nack := func(c <-chan protoext.ReceivedMessage) {
 		msg := <-c
 		msg.Ack(fmt.Errorf("uh oh"))
 	}
@@ -1248,15 +1376,15 @@ func TestSendByCriteria(t *testing.T) {
 	// We try to send to either g2 or g3, but neither would ack us, so we would fail.
 	// However - what we actually check in this test is that we send to peers according to the
 	// filter passed in the criteria
-	failOnAckRequest := func(c <-chan proto.ReceivedMessage, peerId int) {
+	failOnAckRequest := func(c <-chan protoext.ReceivedMessage, peerId int) {
 		msg := <-c
 		if msg == nil {
 			return
 		}
 		t.Fatalf("%d got a message, but shouldn't have!", peerId)
 	}
-	g2Endpoint := fmt.Sprintf("localhost:%d", portPrefix+1)
-	g3Endpoint := fmt.Sprintf("localhost:%d", portPrefix+2)
+	g2Endpoint := fmt.Sprintf("127.0.0.1:%d", port1)
+	g3Endpoint := fmt.Sprintf("127.0.0.1:%d", port2)
 	criteria.IsEligible = func(nm discovery.NetworkMember) bool {
 		return nm.InternalEndpoint == g2Endpoint || nm.InternalEndpoint == g3Endpoint
 	}
@@ -1274,7 +1402,7 @@ func TestSendByCriteria(t *testing.T) {
 	// this property is respected - and only 1 peer receives a message, and not both
 	criteria.MaxPeers = 1
 	// invoke f() in case message has been received
-	waitForMessage := func(c <-chan proto.ReceivedMessage, f func()) {
+	waitForMessage := func(c <-chan protoext.ReceivedMessage, f func()) {
 		select {
 		case msg := <-c:
 			if msg == nil {
@@ -1308,22 +1436,31 @@ func TestIdentityExpiration(t *testing.T) {
 	// Eventually, the rest of the peers should not be able to communicate with
 	// the revoked peer at all because its identity would seem to them as expired
 
-	// Set expiration of the last peer to 5 seconds from now
-	expirationTimes["localhost:7004"] = time.Now().Add(time.Second * 5)
+	var expirationTimesLock sync.RWMutex
 
-	portPrefix := 7000
-	g1 := newGossipInstance(portPrefix, 0, 100)
-	g2 := newGossipInstance(portPrefix, 1, 100, 0)
-	g3 := newGossipInstance(portPrefix, 2, 100, 0)
-	g4 := newGossipInstance(portPrefix, 3, 100, 0)
-	g5 := newGossipInstance(portPrefix, 4, 100, 0)
+	port1, grpc1, certs1, secDialOpts1, _ := util.CreateGRPCLayer()
+	g1 := newGossipInstanceWithGRPCWithLock(&expirationTimesLock, 1, port1, grpc1, certs1, secDialOpts1, 100)
+	port2, grpc2, certs2, secDialOpts2, _ := util.CreateGRPCLayer()
+	g2 := newGossipInstanceWithGRPCWithLock(&expirationTimesLock, 2, port2, grpc2, certs2, secDialOpts2, 100, port1)
+	port3, grpc3, certs3, secDialOpts3, _ := util.CreateGRPCLayer()
+	g3 := newGossipInstanceWithGRPCWithLock(&expirationTimesLock, 3, port3, grpc3, certs3, secDialOpts3, 100, port1)
+	port4, grpc4, certs4, secDialOpts4, _ := util.CreateGRPCLayer()
+	g4 := newGossipInstanceWithGRPCWithLock(&expirationTimesLock, 4, port4, grpc4, certs4, secDialOpts4, 100, port1)
+	port5, grpc5, certs5, secDialOpts5, _ := util.CreateGRPCLayer()
+	g5 := newGossipInstanceWithGRPCWithLock(&expirationTimesLock, 5, port5, grpc5, certs5, secDialOpts5, 100, port1)
+
+	// Set expiration of the last peer to 5 seconds from now
+	endpointLast := fmt.Sprintf("127.0.0.1:%d", port5)
+	expirationTimesLock.Lock()
+	expirationTimes[endpointLast] = time.Now().Add(time.Second * 5)
+	expirationTimesLock.Unlock()
 
 	peers := []Gossip{g1, g2, g3, g4}
 
 	// Make the last peer be revoked in 5 seconds from now
 	time.AfterFunc(time.Second*5, func() {
 		for _, p := range peers {
-			p.(*gossipServiceImpl).mcs.(*naiveCryptoService).revoke(common.PKIidType("localhost:7004"))
+			p.(*gossipGRPC).gossipServiceImpl.mcs.(*naiveCryptoService).revoke(common.PKIidType(endpointLast))
 		}
 	})
 
@@ -1338,13 +1475,15 @@ func TestIdentityExpiration(t *testing.T) {
 	}
 	waitUntilOrFail(t, seeAllNeighbors, "waiting for all instances to form uniform membership view")
 	// Now revoke some peer
+	var ports []int
+	ports = append(ports, port1, port2, port3, port4)
 	revokedPeerIndex := rand.Intn(4)
-	revokedPkiID := common.PKIidType(fmt.Sprintf("localhost:%d", portPrefix+int(revokedPeerIndex)))
+	revokedPkiID := common.PKIidType(fmt.Sprintf("127.0.0.1:%d", ports[revokedPeerIndex]))
 	for i, p := range peers {
 		if i == revokedPeerIndex {
 			continue
 		}
-		p.(*gossipServiceImpl).mcs.(*naiveCryptoService).revoke(revokedPkiID)
+		p.(*gossipGRPC).gossipServiceImpl.mcs.(*naiveCryptoService).revoke(revokedPkiID)
 	}
 	// Trigger a config update to the rest of the peers
 	for i := 0; i < 4; i++ {
@@ -1602,7 +1741,7 @@ func waitUntilOrFail(t *testing.T, pred func() bool, context string) {
 		if pred() {
 			return
 		}
-		time.Sleep(timeout / 60)
+		time.Sleep(timeout / 1000)
 	}
 	util.PrintStackTrace()
 	assert.Failf(t, "Timeout expired, while %s", context)
@@ -1650,7 +1789,6 @@ func checkPeersMembership(t *testing.T, peers []Gossip, n int) func() bool {
 
 func TestMembershipMetrics(t *testing.T) {
 	t.Parallel()
-	portPrefix := 7687
 
 	wg0 := sync.WaitGroup{}
 	wg0.Add(1)
@@ -1676,8 +1814,8 @@ func TestMembershipMetrics(t *testing.T) {
 
 	gmetrics := metrics.NewGossipMetrics(testMetricProvider.FakeProvider)
 
-	pI0 := newGossipInstanceWithCustomMCSWithMetrics(gmetrics, portPrefix, 0, 100,
-		&naiveCryptoService{}, 0, 1)
+	port0, grpc0, certs0, secDialOpts0, _ := util.CreateGRPCLayer()
+	pI0 := newGossipInstanceWithGrpcMcsMetrics(0, port0, grpc0, certs0, secDialOpts0, 100, &naiveCryptoService{}, gmetrics)
 	pI0.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	pI0.UpdateLedgerHeight(1, common.ChainID("A"))
 
@@ -1691,7 +1829,8 @@ func TestMembershipMetrics(t *testing.T) {
 		testMetricProvider.FakeTotalGauge.SetArgsForCall(0),
 	)
 
-	pI1 := newGossipInstanceWithMetrics(metrics.NewGossipMetrics(&disabled.Provider{}), portPrefix, 1, 100, 0)
+	pI1 := newGossipInstanceCreateGRPC(1, 100, port0)
+
 	pI1.JoinChan(&joinChanMsg{}, common.ChainID("A"))
 	pI1.UpdateLedgerHeight(1, common.ChainID("A"))
 

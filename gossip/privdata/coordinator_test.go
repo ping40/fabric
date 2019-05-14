@@ -35,14 +35,18 @@ import (
 	"github.com/hyperledger/fabric/protos/msp"
 	"github.com/hyperledger/fabric/protos/peer"
 	transientstore2 "github.com/hyperledger/fabric/protos/transientstore"
-	"github.com/spf13/viper"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
 func init() {
-	viper.Set("peer.gossip.pvtData.pullRetryThreshold", time.Second*3)
 	factory.InitFactories(nil)
+}
+
+var testConfig = CoordinatorConfig{
+	PullRetryThreshold:      time.Second * 3,
+	TransientBlockRetention: TransientBlockRetentionDefault,
 }
 
 // CollectionCriteria aggregates criteria of
@@ -286,7 +290,7 @@ func (f *fetcherMock) fetch(dig2src dig2sources) (*privdatacommon.FetchedPvtData
 	return nil, args.Get(1).(error)
 }
 
-func createcollectionStore(expectedSignedData common.SignedData) *collectionStore {
+func createcollectionStore(expectedSignedData protoutil.SignedData) *collectionStore {
 	return &collectionStore{
 		expectedSignedData: expectedSignedData,
 		policies:           make(map[collectionAccessPolicy]CollectionCriteria),
@@ -295,7 +299,7 @@ func createcollectionStore(expectedSignedData common.SignedData) *collectionStor
 }
 
 type collectionStore struct {
-	expectedSignedData common.SignedData
+	expectedSignedData protoutil.SignedData
 	acceptsAll         bool
 	acceptsNone        bool
 	lenient            bool
@@ -394,7 +398,7 @@ func (cap *collectionAccessPolicy) IsMemberOnlyWrite() bool {
 }
 
 func (cap *collectionAccessPolicy) AccessFilter() privdata.Filter {
-	return func(sd common.SignedData) bool {
+	return func(sd protoutil.SignedData) bool {
 		that, _ := asn1.Marshal(sd)
 		this, _ := asn1.Marshal(cap.cs.expectedSignedData)
 		if hex.EncodeToString(that) != hex.EncodeToString(this) {
@@ -629,7 +633,7 @@ var expectedCommittedPrivateData3 = map[uint64]*ledger.TxPvtData{}
 func TestCoordinatorStoreInvalidBlock(t *testing.T) {
 	metrics := metrics.NewGossipMetrics(&disabled.Provider{}).PrivdataMetrics
 
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -670,7 +674,7 @@ func TestCoordinatorStoreInvalidBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err := coordinator.StoreBlock(block, pvtData)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "Block.Metadata is nil or Block.Metadata lacks a Tx filter bitmap")
@@ -684,7 +688,7 @@ func TestCoordinatorStoreInvalidBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{fmt.Errorf("failed validating block")},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err = coordinator.StoreBlock(block, pvtData)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed validating block")
@@ -698,7 +702,7 @@ func TestCoordinatorStoreInvalidBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err = coordinator.StoreBlock(block, pvtData)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "Block data size")
@@ -732,7 +736,7 @@ func TestCoordinatorStoreInvalidBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err = coordinator.StoreBlock(block, pvtData)
 	assert.NoError(t, err)
 	assertCommitHappened()
@@ -760,7 +764,7 @@ func TestCoordinatorToFilterOutPvtRWSetsWithWrongHash(t *testing.T) {
 		it has ns1:c1 in transient store, while it has wrong
 		hash, hence it will fetch ns1:c1 from other peers
 	*/
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -814,7 +818,7 @@ func TestCoordinatorToFilterOutPvtRWSetsWithWrongHash(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 
 	fetcher.On("fetch", mock.Anything).expectingDigests([]privdatacommon.DigKey{
 		{
@@ -853,7 +857,7 @@ func TestCoordinatorToFilterOutPvtRWSetsWithWrongHash(t *testing.T) {
 }
 
 func TestCoordinatorStoreBlock(t *testing.T) {
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -913,7 +917,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err := coordinator.StoreBlock(block, pvtData)
 	assert.NoError(t, err)
 	assertCommitHappened()
@@ -1002,7 +1006,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err = coordinator.StoreBlock(block, nil)
 	assert.Error(t, err)
 	assert.Equal(t, "test error", err.Error())
@@ -1051,7 +1055,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err = coordinator.StoreBlock(block, nil)
 	assertPurged("tx3")
 	assert.NoError(t, err)
@@ -1089,7 +1093,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 
 	pvtData = pdFactory.addRWSet().addNSRWSet("ns3", "c3").create()
 	err = coordinator.StoreBlock(block, pvtData)
@@ -1102,7 +1106,7 @@ func TestCoordinatorStoreBlock(t *testing.T) {
 func TestProceedWithoutPrivateData(t *testing.T) {
 	// Scenario: we are missing private data (c2 in ns3) and it cannot be obtained from any peer.
 	// Block needs to be committed with missing private data.
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -1178,7 +1182,7 @@ func TestProceedWithoutPrivateData(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err := coordinator.StoreBlock(block, pvtData)
 	assert.NoError(t, err)
 	assertCommitHappened()
@@ -1188,7 +1192,7 @@ func TestProceedWithoutPrivateData(t *testing.T) {
 func TestProceedWithInEligiblePrivateData(t *testing.T) {
 	// Scenario: we are missing private data (c2 in ns3) and it cannot be obtained from any peer.
 	// Block needs to be committed with missing private data.
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -1229,7 +1233,7 @@ func TestProceedWithInEligiblePrivateData(t *testing.T) {
 		Fetcher:         nil,
 		TransientStore:  nil,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err := coordinator.StoreBlock(block, nil)
 	assert.NoError(t, err)
 	assertCommitHappened()
@@ -1237,7 +1241,7 @@ func TestProceedWithInEligiblePrivateData(t *testing.T) {
 
 func TestCoordinatorGetBlocks(t *testing.T) {
 	metrics := metrics.NewGossipMetrics(&disabled.Provider{}).PrivdataMetrics
-	sd := common.SignedData{
+	sd := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -1252,7 +1256,7 @@ func TestCoordinatorGetBlocks(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, sd, metrics)
+	}, sd, metrics, testConfig)
 
 	hash := util2.ComputeSHA256([]byte("rws-pre-image"))
 	bf := &blockFactory{
@@ -1279,7 +1283,7 @@ func TestCoordinatorGetBlocks(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, sd, metrics)
+	}, sd, metrics, testConfig)
 	expectedPrivData := (&pvtDataFactory{}).addRWSet().addNSRWSet("ns1", "c2").create()
 	block2, returnedPrivateData, err := coordinator.GetPvtDataAndBlockByNum(1, sd)
 	assert.NoError(t, err)
@@ -1298,7 +1302,7 @@ func TestCoordinatorGetBlocks(t *testing.T) {
 func TestPurgeByHeight(t *testing.T) {
 	// Scenario: commit 3000 blocks and ensure that PurgeByHeight is called
 	// at commit of blocks 2000 and 3000 with values of max block to retain of 1000 and 2000
-	peerSelfSignedData := common.SignedData{}
+	peerSelfSignedData := protoutil.SignedData{}
 	cs := createcollectionStore(peerSelfSignedData).thatAcceptsAll()
 
 	var purgeHappened bool
@@ -1330,7 +1334,7 @@ func TestPurgeByHeight(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 
 	for i := 0; i <= 3000; i++ {
 		block := bf.create()
@@ -1347,7 +1351,7 @@ func TestPurgeByHeight(t *testing.T) {
 
 func TestCoordinatorStorePvtData(t *testing.T) {
 	metrics := metrics.NewGossipMetrics(&disabled.Provider{}).PrivdataMetrics
-	cs := createcollectionStore(common.SignedData{}).thatAcceptsAll()
+	cs := createcollectionStore(protoutil.SignedData{}).thatAcceptsAll()
 	committer := &mocks.Committer{}
 	store := &mockTransientStore{t: t}
 	store.On("PersistWithConfig", mock.Anything, uint64(5), mock.Anything).
@@ -1359,7 +1363,7 @@ func TestCoordinatorStorePvtData(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, common.SignedData{}, metrics)
+	}, protoutil.SignedData{}, metrics, testConfig)
 	pvtData := (&pvtDataFactory{}).addRWSet().addNSRWSet("ns1", "c1").create()
 	// Green path: ledger height can be retrieved from ledger/committer
 	err := coordinator.StorePvtData("tx1", &transientstore2.TxPvtReadWriteSetWithConfigInfo{
@@ -1394,7 +1398,7 @@ func TestIgnoreReadOnlyColRWSets(t *testing.T) {
 	// transient store or other peers, the test would fail.
 	// Also - we check that at commit time - the coordinator concluded that
 	// no missing private data was found.
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -1430,7 +1434,7 @@ func TestIgnoreReadOnlyColRWSets(t *testing.T) {
 		Fetcher:         fetcher,
 		TransientStore:  store,
 		Validator:       &validatorMock{},
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	// We pass a nil private data slice to indicate no pre-images though the block contains
 	// private data reads.
 	err := coordinator.StoreBlock(block, nil)
@@ -1439,7 +1443,7 @@ func TestIgnoreReadOnlyColRWSets(t *testing.T) {
 }
 
 func TestCoordinatorMetrics(t *testing.T) {
-	peerSelfSignedData := common.SignedData{
+	peerSelfSignedData := protoutil.SignedData{
 		Identity:  []byte{0, 1, 2},
 		Signature: []byte{3, 4, 5},
 		Data:      []byte{6, 7, 8},
@@ -1473,7 +1477,7 @@ func TestCoordinatorMetrics(t *testing.T) {
 		TransientStore:  store,
 		Validator:       &validatorMock{},
 		ChainID:         "test",
-	}, peerSelfSignedData, metrics)
+	}, peerSelfSignedData, metrics, testConfig)
 	err := coordinator.StoreBlock(block, pvtData)
 	assert.NoError(t, err)
 

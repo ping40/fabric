@@ -9,6 +9,7 @@ package lifecycle
 import (
 	commonledger "github.com/hyperledger/fabric/common/ledger"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
+	validatorstate "github.com/hyperledger/fabric/core/handlers/validation/api/state"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/protos/ledger/queryresult"
 
@@ -44,7 +45,7 @@ type ChaincodePublicLedgerShim struct {
 }
 
 // GetStateRange performs a range query for keys beginning with a particular prefix, and
-// returns it as a map. This function assumes that keys contains only ascii chars from \x00 to \x7e.
+// returns it as a map. This function assumes that keys contain only ascii chars from \x00 to \x7e.
 func (cls *ChaincodePublicLedgerShim) GetStateRange(prefix string) (map[string][]byte, error) {
 	itr, err := cls.GetStateByRange(prefix, prefix+"\x7f")
 	if err != nil {
@@ -76,7 +77,7 @@ type ChaincodePrivateLedgerShim struct {
 }
 
 // GetStateRange performs a range query in the configured collection for all keys beginning
-// with a particular prefix.  This function assumes that keys contains only ascii chars from \x00 to \x7e.
+// with a particular prefix.  This function assumes that keys contain only ascii chars from \x00 to \x7e.
 func (cls *ChaincodePrivateLedgerShim) GetStateRange(prefix string) (map[string][]byte, error) {
 	itr, err := cls.Stub.GetPrivateDataByRange(cls.Collection, prefix, prefix+"\x7f")
 	if err != nil {
@@ -142,4 +143,42 @@ func (ris *ResultsIteratorShim) Next() (*queryresult.KV, error) {
 func (ris *ResultsIteratorShim) Close() error {
 	ris.ResultsIterator.Close()
 	return nil
+}
+
+type ValidatorStateShim struct {
+	ValidatorState validatorstate.State
+	Namespace      string
+}
+
+func (vss *ValidatorStateShim) GetState(key string) ([]byte, error) {
+	result, err := vss.ValidatorState.GetStateMultipleKeys(vss.Namespace, []string{key})
+	if err != nil {
+		return nil, errors.WithMessage(err, "could not get state thought validatorstate shim")
+	}
+	return result[0], nil
+}
+
+type PrivateQueryExecutor interface {
+	GetPrivateDataHash(namespace, collection, key string) (value []byte, err error)
+}
+
+type PrivateQueryExecutorShim struct {
+	Namespace  string
+	Collection string
+	State      PrivateQueryExecutor
+}
+
+func (pqes *PrivateQueryExecutorShim) GetStateHash(key string) ([]byte, error) {
+	return pqes.State.GetPrivateDataHash(pqes.Namespace, pqes.Collection, key)
+}
+
+// DummyQueryExecutorShim implements the ReadableState interface. It is
+// used to ensure channel-less system chaincode calls don't panic and return
+// and error when an invalid operation is attempted (i.e. an InstallChaincode
+// invocation against a chaincode other than _lifecycle)
+type DummyQueryExecutorShim struct {
+}
+
+func (*DummyQueryExecutorShim) GetState(key string) ([]byte, error) {
+	return nil, errors.New("invalid channel-less operation")
 }

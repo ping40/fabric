@@ -14,14 +14,11 @@ import (
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
-
-//go:generate mockery -dir ../../msp/ -name IdentityDeserializer -case underscore -output mocks/
-//go:generate mockery -dir ../../msp/ -name Identity -case underscore -output mocks/
 
 func TestComponentIntegrationSignaturePolicyEnv(t *testing.T) {
 	idds := &mocks.IdentityDeserializer{}
@@ -35,7 +32,7 @@ func TestComponentIntegrationSignaturePolicyEnv(t *testing.T) {
 	}
 
 	spenv := cauthdsl.SignedByMspMember("msp")
-	mspenv := utils.MarshalOrPanic(&peer.ApplicationPolicy{
+	mspenv := protoutil.MarshalOrPanic(&peer.ApplicationPolicy{
 		Type: &peer.ApplicationPolicy_SignaturePolicy{
 			SignaturePolicy: spenv,
 		},
@@ -45,7 +42,7 @@ func TestComponentIntegrationSignaturePolicyEnv(t *testing.T) {
 	id.On("GetIdentifier").Return(&msp.IdentityIdentifier{Id: "id", Mspid: "msp"})
 	id.On("SatisfiesPrincipal", mock.Anything).Return(nil)
 	id.On("Verify", []byte("batti"), []byte("lei")).Return(nil)
-	err := ev.Evaluate(mspenv, []*common.SignedData{{
+	err := ev.Evaluate(mspenv, []*protoutil.SignedData{{
 		Identity:  []byte("guess who"),
 		Data:      []byte("batti"),
 		Signature: []byte("lei"),
@@ -82,7 +79,7 @@ func TestEvaluator(t *testing.T) {
 	// SCENARIO: signature policy supplied - good and bad path
 
 	spenv := &common.SignaturePolicyEnvelope{}
-	mspenv := utils.MarshalOrPanic(&peer.ApplicationPolicy{
+	mspenv := protoutil.MarshalOrPanic(&peer.ApplicationPolicy{
 		Type: &peer.ApplicationPolicy_SignaturePolicy{
 			SignaturePolicy: spenv,
 		},
@@ -102,7 +99,7 @@ func TestEvaluator(t *testing.T) {
 	// SCENARIO: channel ref policy supplied - good and bad path
 
 	chrefstr := "Quo usque tandem abutere, Catilina, patientia nostra?"
-	chrefstrEnv := utils.MarshalOrPanic(&peer.ApplicationPolicy{
+	chrefstrEnv := protoutil.MarshalOrPanic(&peer.ApplicationPolicy{
 		Type: &peer.ApplicationPolicy_ChannelConfigPolicyReference{
 			ChannelConfigPolicyReference: chrefstr,
 		},
@@ -118,4 +115,32 @@ func TestEvaluator(t *testing.T) {
 	err = ev.Evaluate(chrefstrEnv, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "bad policy")
+}
+
+func TestChannelPolicyReference(t *testing.T) {
+	mcpmg := &mocks.ChannelPolicyManagerGetter{}
+	mcpmg.On("Manager", "channel").Return(nil, false).Once()
+	ape, err := New(nil, "channel", mcpmg)
+	assert.Error(t, err)
+	assert.Nil(t, ape)
+	assert.Contains(t, err.Error(), "failed to retrieve policy manager for channel")
+
+	mm := &mocks.PolicyManager{}
+	mcpmg.On("Manager", "channel").Return(mm, true).Once()
+	ape, err = New(nil, "channel", mcpmg)
+	assert.NoError(t, err)
+	assert.NotNil(t, ape)
+
+	mcpmg.On("Manager", "channel").Return(mm, true)
+
+	mp := &mocks.Policy{}
+	mp.On("Evaluate", mock.Anything).Return(nil)
+	mm.On("GetPolicy", "As the sun breaks above the ground").Return(mp, true)
+	err = ape.evaluateChannelConfigPolicyReference("As the sun breaks above the ground", nil)
+	assert.NoError(t, err)
+
+	mm.On("GetPolicy", "An old man stands on the hill").Return(nil, false)
+	err = ape.evaluateChannelConfigPolicyReference("An old man stands on the hill", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to retrieve policy for reference")
 }

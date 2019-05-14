@@ -75,20 +75,16 @@ func (s *Prover) ProcessCommand(ctx context.Context, sc *token.SignedCommand) (c
 
 	var payload interface{}
 	switch t := command.GetPayload().(type) {
-	case *token.Command_ImportRequest:
-		payload, err = s.RequestImport(ctx, command.Header, t.ImportRequest)
+	case *token.Command_IssueRequest:
+		payload, err = s.RequestIssue(ctx, command.Header, t.IssueRequest)
 	case *token.Command_TransferRequest:
 		payload, err = s.RequestTransfer(ctx, command.Header, t.TransferRequest)
 	case *token.Command_RedeemRequest:
 		payload, err = s.RequestRedeem(ctx, command.Header, t.RedeemRequest)
 	case *token.Command_ListRequest:
 		payload, err = s.ListUnspentTokens(ctx, command.Header, t.ListRequest)
-	case *token.Command_ApproveRequest:
-		payload, err = s.RequestApprove(ctx, command.Header, t.ApproveRequest)
-	case *token.Command_TransferFromRequest:
-		payload, err = s.RequestTransferFrom(ctx, command.Header, t.TransferFromRequest)
-	case *token.Command_ExpectationRequest:
-		payload, err = s.RequestExpectation(ctx, command.Header, t.ExpectationRequest)
+	case *token.Command_TokenOperationRequest:
+		payload, err = s.RequestTokenOperations(ctx, command.Header, t.TokenOperationRequest)
 	default:
 		err = errors.Errorf("command type not recognized: %T", t)
 	}
@@ -104,13 +100,13 @@ func (s *Prover) ProcessCommand(ctx context.Context, sc *token.SignedCommand) (c
 	return
 }
 
-func (s *Prover) RequestImport(ctx context.Context, header *token.Header, requestImport *token.ImportRequest) (*token.CommandResponse_TokenTransaction, error) {
+func (s *Prover) RequestIssue(ctx context.Context, header *token.Header, requestImport *token.IssueRequest) (*token.CommandResponse_TokenTransaction, error) {
 	issuer, err := s.TMSManager.GetIssuer(header.ChannelId, requestImport.Credential, header.Creator)
 	if err != nil {
 		return nil, err
 	}
 
-	tokenTransaction, err := issuer.RequestImport(requestImport.TokensToIssue)
+	tokenTransaction, err := issuer.RequestIssue(requestImport.TokensToIssue)
 	if err != nil {
 		return nil, err
 	}
@@ -163,75 +159,48 @@ func (s *Prover) ListUnspentTokens(ctxt context.Context, header *token.Header, l
 	return &token.CommandResponse_UnspentTokens{UnspentTokens: tokens}, nil
 }
 
-func (s *Prover) RequestApprove(ctx context.Context, header *token.Header, request *token.ApproveRequest) (*token.CommandResponse_TokenTransaction, error) {
-	transactor, err := s.TMSManager.GetTransactor(header.ChannelId, request.Credential, header.Creator)
-	if err != nil {
-		return nil, err
-	}
-	defer transactor.Done()
-
-	tokenTransaction, err := transactor.RequestApprove(request)
-	if err != nil {
-		return nil, err
-	}
-
-	return &token.CommandResponse_TokenTransaction{TokenTransaction: tokenTransaction}, nil
-}
-
-func (s *Prover) RequestTransferFrom(ctx context.Context, header *token.Header, request *token.TransferRequest) (*token.CommandResponse_TokenTransaction, error) {
-	transactor, err := s.TMSManager.GetTransactor(header.ChannelId, request.Credential, header.Creator)
-	if err != nil {
-		return nil, err
-	}
-	defer transactor.Done()
-
-	tokenTransaction, err := transactor.RequestTransferFrom(request)
-	if err != nil {
-		return nil, err
-	}
-
-	return &token.CommandResponse_TokenTransaction{TokenTransaction: tokenTransaction}, nil
-}
-
-// RequestExpectation gets an issuer or transactor and creates a token transaction response
+// RequestTokenOperation gets an issuer or transactor and creates a token transaction response
 // for import, transfer or redemption.
-func (s *Prover) RequestExpectation(ctx context.Context, header *token.Header, request *token.ExpectationRequest) (*token.CommandResponse_TokenTransaction, error) {
-	if request.GetExpectation() == nil {
-		return nil, errors.New("no token expectation in ExpectationRequest")
-	}
-	plainExpectation := request.GetExpectation().GetPlainExpectation()
-	if plainExpectation == nil {
-		return nil, errors.New("no plain expectation in ExpectationRequest")
+func (s *Prover) RequestTokenOperations(ctx context.Context, header *token.Header, request *token.TokenOperationRequest) (*token.CommandResponse_TokenTransactions, error) {
+	ops := request.GetOperations()
+	if len(ops) == 0 {
+		return nil, errors.New("no token operations requested")
 	}
 
-	// get either issuer or transactor based on payload type in the request
-	var tokenTransaction *token.TokenTransaction
-	switch t := plainExpectation.GetPayload().(type) {
-	case *token.PlainExpectation_ImportExpectation:
-		issuer, err := s.TMSManager.GetIssuer(header.ChannelId, request.Credential, header.Creator)
-		if err != nil {
-			return nil, err
+	tokenIds := request.TokenIds
+	// get an issuer and a transactor based on payload type in the request
+	var txts []*token.TokenTransaction
+	for _, op := range ops {
+		var tokenTransaction *token.TokenTransaction
+		switch t := op.GetAction().GetPayload().(type) {
+		case *token.TokenOperationAction_Issue:
+			issuer, err := s.TMSManager.GetIssuer(header.ChannelId, request.Credential, header.Creator)
+			if err != nil {
+				return nil, err
+			}
+			tokenTransaction, err = issuer.RequestTokenOperation(op)
+			if err != nil {
+				return nil, err
+			}
+		case *token.TokenOperationAction_Transfer:
+			var count int
+			transactor, err := s.TMSManager.GetTransactor(header.ChannelId, request.Credential, header.Creator)
+			if err != nil {
+				return nil, err
+			}
+			defer transactor.Done()
+			tokenTransaction, count, err = transactor.RequestTokenOperation(tokenIds, op)
+			if err != nil {
+				return nil, err
+			}
+			tokenIds = tokenIds[count:]
+		default:
+			return nil, errors.Errorf("operation payload type not recognized: %T", t)
 		}
-		tokenTransaction, err = issuer.RequestExpectation(request)
-		if err != nil {
-			return nil, err
-		}
-	case *token.PlainExpectation_TransferExpectation:
-		transactor, err := s.TMSManager.GetTransactor(header.ChannelId, request.Credential, header.Creator)
-		if err != nil {
-			return nil, err
-		}
-		defer transactor.Done()
-
-		tokenTransaction, err = transactor.RequestExpectation(request)
-		if err != nil {
-			return nil, err
-		}
-	default:
-		return nil, errors.Errorf("expectation payload type not recognized: %T", t)
+		txts = append(txts, tokenTransaction)
 	}
 
-	return &token.CommandResponse_TokenTransaction{TokenTransaction: tokenTransaction}, nil
+	return &token.CommandResponse_TokenTransactions{TokenTransactions: &token.TokenTransactions{Txs: txts}}, nil
 }
 
 func (s *Prover) ValidateHeader(header *token.Header) error {

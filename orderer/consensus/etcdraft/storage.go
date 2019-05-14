@@ -8,19 +8,20 @@ package etcdraft
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/coreos/etcd/pkg/fileutil"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/coreos/etcd/snap"
-	"github.com/coreos/etcd/wal"
-	"github.com/coreos/etcd/wal/walpb"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/pkg/errors"
+	"go.etcd.io/etcd/etcdserver/api/snap"
+	"go.etcd.io/etcd/pkg/fileutil"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/wal"
+	"go.etcd.io/etcd/wal/walpb"
 )
 
 // MaxSnapshotFiles defines max number of etcd/raft snapshot files to retain
@@ -69,7 +70,7 @@ func CreateStorage(
 	ram MemoryStorage,
 ) (*RaftStorage, error) {
 
-	sn, err := createSnapshotter(snapDir)
+	sn, err := createSnapshotter(lg, snapDir)
 	if err != nil {
 		return nil, err
 	}
@@ -83,17 +84,13 @@ func CreateStorage(
 		}
 	} else {
 		// snapshot found
-		lg.Debugf("Loaded snapshot at Term %d and Index %d", snapshot.Metadata.Term, snapshot.Metadata.Index)
+		lg.Debugf("Loaded snapshot at Term %d and Index %d, Nodes: %+v",
+			snapshot.Metadata.Term, snapshot.Metadata.Index, snapshot.Metadata.ConfState.Nodes)
 	}
 
-	w, err := createWAL(lg, walDir, snapshot)
+	w, st, ents, err := createOrReadWAL(lg, walDir, snapshot)
 	if err != nil {
-		return nil, err
-	}
-
-	_, st, ents, err := w.ReadAll()
-	if err != nil {
-		return nil, errors.Errorf("failed to read WAL: %s", err)
+		return nil, errors.Errorf("failed to create or read WAL: %s", err)
 	}
 
 	if snapshot != nil {
@@ -147,7 +144,7 @@ func ListSnapshots(logger *flogging.FabricLogger, snapDir string) []uint64 {
 	var snapshots []uint64
 	for _, snapfile := range snapfiles {
 		fpath := filepath.Join(snapDir, snapfile)
-		s, err := snap.Read(fpath)
+		s, err := snap.Read(logger.Zap(), fpath)
 		if err != nil {
 			logger.Errorf("Snapshot file %s is corrupted: %s", fpath, err)
 
@@ -167,30 +164,30 @@ func ListSnapshots(logger *flogging.FabricLogger, snapDir string) []uint64 {
 	return snapshots
 }
 
-func createSnapshotter(snapDir string) (*snap.Snapshotter, error) {
+func createSnapshotter(logger *flogging.FabricLogger, snapDir string) (*snap.Snapshotter, error) {
 	if err := os.MkdirAll(snapDir, os.ModePerm); err != nil {
 		return nil, errors.Errorf("failed to mkdir '%s' for snapshot: %s", snapDir, err)
 	}
 
-	return snap.New(snapDir), nil
+	return snap.New(logger.Zap(), snapDir), nil
 }
 
-func createWAL(lg *flogging.FabricLogger, walDir string, snapshot *raftpb.Snapshot) (*wal.WAL, error) {
+func createOrReadWAL(lg *flogging.FabricLogger, walDir string, snapshot *raftpb.Snapshot) (w *wal.WAL, st raftpb.HardState, ents []raftpb.Entry, err error) {
 	if !wal.Exist(walDir) {
 		lg.Infof("No WAL data found, creating new WAL at path '%s'", walDir)
 		// TODO(jay_guo) add metadata to be persisted with wal once we need it.
 		// use case could be data dump and restore on a new node.
-		w, err := wal.Create(walDir, nil)
+		w, err := wal.Create(lg.Zap(), walDir, nil)
 		if err == os.ErrExist {
 			lg.Fatalf("programming error, we've just checked that WAL does not exist")
 		}
 
 		if err != nil {
-			return nil, errors.Errorf("failed to initialize WAL: %s", err)
+			return nil, st, nil, errors.Errorf("failed to initialize WAL: %s", err)
 		}
 
 		if err = w.Close(); err != nil {
-			return nil, errors.Errorf("failed to close the WAL just created: %s", err)
+			return nil, st, nil, errors.Errorf("failed to close the WAL just created: %s", err)
 		}
 	} else {
 		lg.Infof("Found WAL data at path '%s', replaying it", walDir)
@@ -202,12 +199,39 @@ func createWAL(lg *flogging.FabricLogger, walDir string, snapshot *raftpb.Snapsh
 	}
 
 	lg.Debugf("Loading WAL at Term %d and Index %d", walsnap.Term, walsnap.Index)
-	w, err := wal.Open(walDir, walsnap)
-	if err != nil {
-		return nil, errors.Errorf("failed to open existing WAL: %s", err)
+
+	var repaired bool
+	for {
+		if w, err = wal.Open(lg.Zap(), walDir, walsnap); err != nil {
+			return nil, st, nil, errors.Errorf("failed to open WAL: %s", err)
+		}
+
+		if _, st, ents, err = w.ReadAll(); err != nil {
+			lg.Warnf("Failed to read WAL: %s", err)
+
+			if errc := w.Close(); errc != nil {
+				return nil, st, nil, errors.Errorf("failed to close erroneous WAL: %s", errc)
+			}
+
+			// only repair UnexpectedEOF and only repair once
+			if repaired || err != io.ErrUnexpectedEOF {
+				return nil, st, nil, errors.Errorf("failed to read WAL and cannot repair: %s", err)
+			}
+
+			if !wal.Repair(lg.Zap(), walDir) {
+				return nil, st, nil, errors.Errorf("failed to repair WAL: %s", err)
+			}
+
+			repaired = true
+			// next loop should be able to open WAL and return
+			continue
+		}
+
+		// successfully opened WAL and read all entries, break
+		break
 	}
 
-	return w, nil
+	return w, st, ents, nil
 }
 
 // Snapshot returns the latest snapshot stored in memory
@@ -245,6 +269,8 @@ func (rs *RaftStorage) Store(entries []raftpb.Entry, hardstate raftpb.HardState,
 }
 
 func (rs *RaftStorage) saveSnap(snap raftpb.Snapshot) error {
+	rs.lg.Infof("Persisting snapshot (term: %d, index: %d) to WAL and disk", snap.Metadata.Term, snap.Metadata.Index)
+
 	// must save the snapshot index to the WAL before saving the
 	// snapshot to maintain the invariant that we only Open the
 	// wal at previously-saved snapshot indexes.
@@ -253,12 +279,10 @@ func (rs *RaftStorage) saveSnap(snap raftpb.Snapshot) error {
 		Term:  snap.Metadata.Term,
 	}
 
-	rs.lg.Debugf("Saving snapshot to WAL")
 	if err := rs.wal.SaveSnapshot(walsnap); err != nil {
 		return errors.Errorf("failed to save snapshot to WAL: %s", err)
 	}
 
-	rs.lg.Debugf("Saving snapshot to disk")
 	if err := rs.snap.SaveSnap(snap); err != nil {
 		return errors.Errorf("failed to save snapshot to disk: %s", err)
 	}

@@ -8,11 +8,19 @@ package msgprocessor
 
 import (
 	"github.com/hyperledger/fabric/common/channelconfig"
-	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/policies"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	cb "github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
+
+	"github.com/pkg/errors"
 )
+
+//go:generate counterfeiter -o mocks/signer_serializer.go --fake-name SignerSerializer . signerSerializer
+
+type signerSerializer interface {
+	identity.SignerSerializer
+}
 
 // StandardChannelSupport includes the resources needed for the StandardChannel processor.
 type StandardChannelSupport interface {
@@ -23,7 +31,7 @@ type StandardChannelSupport interface {
 	ChainID() string
 
 	// Signer returns the signer for this orderer
-	Signer() crypto.LocalSigner
+	Signer() identity.SignerSerializer
 
 	// ProposeConfigUpdate takes in an Envelope of type CONFIG_UPDATE and produces a
 	// ConfigEnvelope to be used as the Envelope Payload Data of a CONFIG message
@@ -98,10 +106,10 @@ func (s *StandardChannel) ProcessConfigUpdateMsg(env *cb.Envelope) (config *cb.E
 
 	configEnvelope, err := s.support.ProposeConfigUpdate(env)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errors.WithMessagef(err, "error applying config update to existing channel '%s'", s.support.ChainID())
 	}
 
-	config, err = utils.CreateSignedEnvelope(cb.HeaderType_CONFIG, s.support.ChainID(), s.support.Signer(), configEnvelope, msgVersion, epoch)
+	config, err = protoutil.CreateSignedEnvelope(cb.HeaderType_CONFIG, s.support.ChainID(), s.support.Signer(), configEnvelope, msgVersion, epoch)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -125,7 +133,7 @@ func (s *StandardChannel) ProcessConfigMsg(env *cb.Envelope) (config *cb.Envelop
 	logger.Debugf("Processing config message for channel %s", s.support.ChainID())
 
 	configEnvelope := &cb.ConfigEnvelope{}
-	_, err = utils.UnmarshalEnvelopeOfType(env, cb.HeaderType_CONFIG, configEnvelope)
+	_, err = protoutil.UnmarshalEnvelopeOfType(env, cb.HeaderType_CONFIG, configEnvelope)
 	if err != nil {
 		return
 	}

@@ -14,7 +14,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	vsccErrors "github.com/hyperledger/fabric/common/errors"
-	util2 "github.com/hyperledger/fabric/common/util"
+	commonutil "github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/committer"
 	"github.com/hyperledger/fabric/core/committer/txvalidator"
 	"github.com/hyperledger/fabric/core/common/privdata"
@@ -28,28 +28,34 @@ import (
 	"github.com/hyperledger/fabric/protos/ledger/rwset"
 	"github.com/hyperledger/fabric/protos/msp"
 	"github.com/hyperledger/fabric/protos/peer"
-	transientstore2 "github.com/hyperledger/fabric/protos/transientstore"
-	"github.com/hyperledger/fabric/protos/utils"
+	protostransientstore "github.com/hyperledger/fabric/protos/transientstore"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
-	"github.com/spf13/viper"
 )
 
-const (
-	pullRetrySleepInterval           = time.Second
-	transientBlockRetentionConfigKey = "peer.gossip.pvtData.transientstoreMaxBlockRetention"
-	transientBlockRetentionDefault   = 1000
-)
+const pullRetrySleepInterval = time.Second
 
 var logger = util.GetLogger(util.PrivateDataLogger, "")
 
-//go:generate mockery -dir ../../core/common/privdata/ -name CollectionStore -case underscore -output mocks/
-//go:generate mockery -dir ../../core/committer/ -name Committer -case underscore -output mocks/
+//go:generate mockery -dir . -name CollectionStore -case underscore -output mocks/
 
-// TransientStore holds private data that the corresponding blocks haven't been committed yet into the ledger
+// CollectionStore is the local interface used to generate mocks for foreign interface.
+type CollectionStore interface {
+	privdata.CollectionStore
+}
+
+//go:generate mockery -dir . -name Committer -case underscore -output mocks/
+
+// Committer is the local interface used to generate mocks for foreign interface.
+type Committer interface {
+	committer.Committer
+}
+
+// TransientStore holds private data that the corresponding blocks haven't been committed yet into the ledger.
 type TransientStore interface {
 	// PersistWithConfig stores the private write set of a transaction along with the collection config
 	// in the transient store based on txid and the block height the private data was received at
-	PersistWithConfig(txid string, blockHeight uint64, privateSimulationResultsWithConfig *transientstore2.TxPvtReadWriteSetWithConfigInfo) error
+	PersistWithConfig(txid string, blockHeight uint64, privateSimulationResultsWithConfig *protostransientstore.TxPvtReadWriteSetWithConfigInfo) error
 
 	// Persist stores the private write set of a transaction in the transient store
 	Persist(txid string, blockHeight uint64, privateSimulationResults *rwset.TxPvtReadWriteSet) error
@@ -79,13 +85,13 @@ type Coordinator interface {
 	StoreBlock(block *common.Block, data util.PvtDataCollections) error
 
 	// StorePvtData used to persist private data into transient store
-	StorePvtData(txid string, privData *transientstore2.TxPvtReadWriteSetWithConfigInfo, blckHeight uint64) error
+	StorePvtData(txid string, privData *protostransientstore.TxPvtReadWriteSetWithConfigInfo, blckHeight uint64) error
 
 	// GetPvtDataAndBlockByNum get block by number and returns also all related private data
 	// the order of private data in slice of PvtDataCollections doesn't implies the order of
 	// transactions in the block related to these private data, to get the correct placement
 	// need to read TxPvtData.SeqInBlock field
-	GetPvtDataAndBlockByNum(seqNum uint64, peerAuth common.SignedData) (*common.Block, util.PvtDataCollections, error)
+	GetPvtDataAndBlockByNum(seqNum uint64, peerAuth protoutil.SignedData) (*common.Block, util.PvtDataCollections, error)
 
 	// Get recent block sequence number
 	LedgerHeight() (uint64, error)
@@ -122,25 +128,28 @@ type Support struct {
 }
 
 type coordinator struct {
-	selfSignedData common.SignedData
+	selfSignedData protoutil.SignedData
 	Support
 	transientBlockRetention uint64
 	metrics                 *metrics.PrivdataMetrics
+	pullRetryThreshold      time.Duration
+}
+
+type CoordinatorConfig struct {
+	TransientBlockRetention uint64
+	PullRetryThreshold      time.Duration
 }
 
 // NewCoordinator creates a new instance of coordinator
-func NewCoordinator(support Support, selfSignedData common.SignedData, metrics *metrics.PrivdataMetrics) Coordinator {
-	transientBlockRetention := uint64(viper.GetInt(transientBlockRetentionConfigKey))
-	if transientBlockRetention == 0 {
-		logger.Warning("Configuration key", transientBlockRetentionConfigKey, "isn't set, defaulting to", transientBlockRetentionDefault)
-		transientBlockRetention = transientBlockRetentionDefault
-	}
+func NewCoordinator(support Support, selfSignedData protoutil.SignedData, metrics *metrics.PrivdataMetrics,
+	config CoordinatorConfig) Coordinator {
 	return &coordinator{Support: support, selfSignedData: selfSignedData,
-		transientBlockRetention: transientBlockRetention, metrics: metrics}
+		transientBlockRetention: config.TransientBlockRetention, metrics: metrics,
+		pullRetryThreshold: config.PullRetryThreshold}
 }
 
 // StorePvtData used to persist private date into transient store
-func (c *coordinator) StorePvtData(txID string, privData *transientstore2.TxPvtReadWriteSetWithConfigInfo, blkHeight uint64) error {
+func (c *coordinator) StorePvtData(txID string, privData *protostransientstore.TxPvtReadWriteSetWithConfigInfo, blkHeight uint64) error {
 	return c.TransientStore.PersistWithConfig(txID, blkHeight, privData)
 }
 
@@ -186,7 +195,7 @@ func (c *coordinator) StoreBlock(block *common.Block, privateDataSets util.PvtDa
 
 	c.reportListMissingPrivateDataDuration(time.Since(listMissingStart))
 
-	retryThresh := viper.GetDuration("peer.gossip.pvtData.pullRetryThreshold")
+	retryThresh := c.pullRetryThreshold
 	var bFetchFromPeers bool // defaults to false
 	if len(privateInfo.missingKeys) == 0 {
 		logger.Debugf("[%s] No missing collection private write sets to fetch from remote peers", c.ChainID)
@@ -295,7 +304,7 @@ func (c *coordinator) fetchFromPeers(blockSeq uint64, ownedRWsets map[rwSetKey][
 	for _, element := range fetchedData.AvailableElements {
 		dig := element.Digest
 		for _, rws := range element.Payload {
-			hash := hex.EncodeToString(util2.ComputeSHA256(rws))
+			hash := hex.EncodeToString(commonutil.ComputeSHA256(rws))
 			key := rwSetKey{
 				txID:       dig.TxId,
 				namespace:  dig.Namespace,
@@ -370,7 +379,7 @@ func (c *coordinator) fetchFromTransientStore(txAndSeq txAndSeqInBlock, filter l
 					seqInBlock: txAndSeq.seqInBlock,
 					collection: col.CollectionName,
 					namespace:  ns.Namespace,
-					hash:       hex.EncodeToString(util2.ComputeSHA256(col.Rwset)),
+					hash:       hex.EncodeToString(commonutil.ComputeSHA256(col.Rwset)),
 				}
 				// populate the ownedRWsets with the RW set from the transient store
 				ownedRWsets[key] = col.Rwset
@@ -389,22 +398,22 @@ func computeOwnedRWsets(block *common.Block, blockPvtData util.PvtDataCollection
 			logger.Warningf("Claimed SeqInBlock %d but block has only %d transactions", txPvtData.SeqInBlock, len(block.Data.Data))
 			continue
 		}
-		env, err := utils.GetEnvelopeFromBlock(block.Data.Data[txPvtData.SeqInBlock])
+		env, err := protoutil.GetEnvelopeFromBlock(block.Data.Data[txPvtData.SeqInBlock])
 		if err != nil {
 			return nil, err
 		}
-		payload, err := utils.GetPayload(env)
+		payload, err := protoutil.GetPayload(env)
 		if err != nil {
 			return nil, err
 		}
 
-		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 		if err != nil {
 			return nil, err
 		}
 		for _, ns := range txPvtData.WriteSet.NsPvtRwset {
 			for _, col := range ns.CollectionPvtRwset {
-				computedHash := hex.EncodeToString(util2.ComputeSHA256(col.Rwset))
+				computedHash := hex.EncodeToString(commonutil.ComputeSHA256(col.Rwset))
 				ownedRWsets[rwSetKey{
 					txID:       chdr.TxId,
 					seqInBlock: txPvtData.SeqInBlock,
@@ -559,19 +568,19 @@ type blockConsumer func(seqInBlock uint64, chdr *common.ChannelHeader, txRWSet *
 func (data blockData) forEachTxn(txsFilter txValidationFlags, consumer blockConsumer) (txns, error) {
 	var txList []string
 	for seqInBlock, envBytes := range data {
-		env, err := utils.GetEnvelopeFromBlock(envBytes)
+		env, err := protoutil.GetEnvelopeFromBlock(envBytes)
 		if err != nil {
 			logger.Warning("Invalid envelope:", err)
 			continue
 		}
 
-		payload, err := utils.GetPayload(env)
+		payload, err := protoutil.GetPayload(env)
 		if err != nil {
 			logger.Warning("Invalid payload:", err)
 			continue
 		}
 
-		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 		if err != nil {
 			logger.Warning("Invalid channel header:", err)
 			continue
@@ -588,19 +597,19 @@ func (data blockData) forEachTxn(txsFilter txValidationFlags, consumer blockCons
 			continue
 		}
 
-		respPayload, err := utils.GetActionFromEnvelope(envBytes)
+		respPayload, err := protoutil.GetActionFromEnvelope(envBytes)
 		if err != nil {
 			logger.Warning("Failed obtaining action from envelope", err)
 			continue
 		}
 
-		tx, err := utils.GetTransaction(payload.Data)
+		tx, err := protoutil.GetTransaction(payload.Data)
 		if err != nil {
 			logger.Warning("Invalid transaction in payload data for tx ", chdr.TxId, ":", err)
 			continue
 		}
 
-		ccActionPayload, err := utils.GetChaincodeActionPayload(tx.Actions[0].Payload)
+		ccActionPayload, err := protoutil.GetChaincodeActionPayload(tx.Actions[0].Payload)
 		if err != nil {
 			logger.Warning("Invalid chaincode action in payload for tx", chdr.TxId, ":", err)
 			continue
@@ -840,7 +849,7 @@ func (ac aggregatedCollections) asPrivateData() []*ledger.TxPvtData {
 // the order of private data in slice of PvtDataCollections doesn't implies the order of
 // transactions in the block related to these private data, to get the correct placement
 // need to read TxPvtData.SeqInBlock field
-func (c *coordinator) GetPvtDataAndBlockByNum(seqNum uint64, peerAuthInfo common.SignedData) (*common.Block, util.PvtDataCollections, error) {
+func (c *coordinator) GetPvtDataAndBlockByNum(seqNum uint64, peerAuthInfo protoutil.SignedData) (*common.Block, util.PvtDataCollections, error) {
 	blockAndPvtData, err := c.Committer.GetPvtDataAndBlockByNum(seqNum)
 	if err != nil {
 		return nil, nil, err

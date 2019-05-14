@@ -22,17 +22,15 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/txmgr"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/version"
 	btltestutil "github.com/hyperledger/fabric/core/ledger/pvtdatapolicy/testutil"
-	ledgertestutil "github.com/hyperledger/fabric/core/ledger/testutil"
 	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/hyperledger/fabric/protos/ledger/queryresult"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMain(m *testing.M) {
-	ledgertestutil.SetupCoreYAMLConfig()
-	flogging.ActivateSpec("lockbasedtxmgr,statevalidator,statebasedval,statecouchdb,valimpl,pvtstatepurgemgmt,valinternal=debug")
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/ledgertests/kvledger/txmgmt/txmgr/lockbasedtxmgr")
+	flogging.ActivateSpec(
+		"lockbasedtxmgr,statevalidator,statebasedval,statecouchdb,valimpl,pvtstatepurgemgmt,valinternal=debug",
+	)
 	os.Exit(m.Run())
 }
 
@@ -1083,8 +1081,6 @@ func producePvtdata(t *testing.T, txNum uint64, nsColls []string, keys []string,
 func TestRemoveStaleAndCommitPvtDataOfOldBlocks(t *testing.T) {
 	for _, testEnv := range testEnvs {
 		t.Logf("Running test for TestEnv = %s", testEnv.getName())
-		testLedgerID := "testvalidationandcommitofoldpvtdata"
-		testEnv.init(t, testLedgerID, nil)
 		testValidationAndCommitOfOldPvtData(t, testEnv)
 		testEnv.cleanup()
 	}
@@ -1403,7 +1399,6 @@ func TestTxSimulatorMissingPvtdataExpiry(t *testing.T) {
 	txMgr := testEnv.getTxMgr()
 	populateCollConfigForTest(t, txMgr.(*LockBasedTxMgr), []collConfigkey{{"ns", "coll"}}, version.NewHeight(1, 1))
 
-	viper.Set(fmt.Sprintf("ledger.pvtdata.btlpolicy.%s.ns.coll", ledgerid), 1)
 	bg, _ := testutil.NewBlockGenerator(t, ledgerid, false)
 
 	blkAndPvtdata := prepareNextBlockForTest(t, txMgr, bg, "txid-1",

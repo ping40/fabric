@@ -31,7 +31,7 @@ type Peer struct {
 	ID                     string          `yaml:"id,omitempty"`
 	NetworkID              string          `yaml:"networkId,omitempty"`
 	ListenAddress          string          `yaml:"listenAddress,omitempty"`
-	ChaincodeListenAddress string          `yaml:"chaincodeListenAddress,omitempty"`
+	ChaincodeListenAddress string          `yaml:"ChaincodeListenAddress,omitempty"`
 	ChaincodeAddress       string          `yaml:"chaincodeAddress,omitempty"`
 	Address                string          `yaml:"address,omitempty"`
 	AddressAutoDetect      bool            `yaml:"addressAutoDetect"`
@@ -230,7 +230,7 @@ type Node struct {
 }
 
 type SystemFlags struct {
-	NEWLIFECYCLE string `yaml:"+lifecycle,omitempty"`
+	NEWLIFECYCLE string `yaml:"_lifecycle,omitempty"`
 	CSCC         string `yaml:"cscc,omitempty"`
 	LSCC         string `yaml:"lscc,omitempty"`
 	ESCC         string `yaml:"escc,omitempty"`

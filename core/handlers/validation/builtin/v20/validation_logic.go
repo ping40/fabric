@@ -8,33 +8,72 @@ package v20
 
 import (
 	"fmt"
-	"regexp"
 
+	"github.com/golang/protobuf/proto"
 	commonerrors "github.com/hyperledger/fabric/common/errors"
 	"github.com/hyperledger/fabric/common/flogging"
-	"github.com/hyperledger/fabric/core/chaincode/platforms/ccmetadata"
-	. "github.com/hyperledger/fabric/core/common/validation/statebased"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/capabilities"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/identities"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/policies"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/state"
+	"github.com/hyperledger/fabric/core/common/validation/statebased"
+	vc "github.com/hyperledger/fabric/core/handlers/validation/api/capabilities"
+	vi "github.com/hyperledger/fabric/core/handlers/validation/api/identities"
+	vp "github.com/hyperledger/fabric/core/handlers/validation/api/policies"
+	vs "github.com/hyperledger/fabric/core/handlers/validation/api/state"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
+	"github.com/pkg/errors"
 )
 
 var logger = flogging.MustGetLogger("vscc")
 
-var validCollectionNameRegex = regexp.MustCompile(ccmetadata.AllowedCharsCollectionName)
+//go:generate mockery -dir . -name IdentityDeserializer -case underscore -output mocks/
 
-//go:generate mockery -dir ../../api/identities/ -name IdentityDeserializer -case underscore -output mocks/
+// IdentityDeserializer is the local interface that used to generate mocks for foreign interface.
+type IdentityDeserializer interface {
+	vi.IdentityDeserializer
+}
+
+//go:generate mockery -dir . -name CollectionResources -case underscore -output mocks/
+
+// CollectionResources is the local interface that used to generate mocks for foreign interface.
+type CollectionResources interface {
+	statebased.CollectionResources
+}
+
 //go:generate mockery -dir . -name StateBasedValidator -case underscore -output mocks/
+
+// toApplicationPolicyTranslator implements statebased.PolicyTranslator
+// by translating SignaturePolicyEnvelope policies into ApplicationPolicy
+// ones; this is required because the 2.0 validator is supplied with a
+// policy evaluator that can only understand ApplicationPolicy policies.
+type toApplicationPolicyTranslator struct{}
+
+func (n *toApplicationPolicyTranslator) Translate(b []byte) ([]byte, error) {
+	if len(b) == 0 {
+		return b, nil
+	}
+
+	spe := &common.SignaturePolicyEnvelope{}
+	err := proto.Unmarshal(b, spe)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not unmarshal signature policy envelope")
+	}
+
+	return protoutil.MarshalOrPanic(&peer.ApplicationPolicy{
+		Type: &peer.ApplicationPolicy_SignaturePolicy{
+			SignaturePolicy: spe,
+		},
+	}), nil
+}
 
 // New creates a new instance of the default VSCC
 // Typically this will only be invoked once per peer
-func New(c Capabilities, s StateFetcher, d IdentityDeserializer, pe PolicyEvaluator) *Validator {
-	vpmgr := &KeyLevelValidationParameterManagerImpl{StateFetcher: s}
-	sbv := NewKeyLevelValidator(pe, vpmgr)
+func New(c vc.Capabilities, s vs.StateFetcher, d vi.IdentityDeserializer, pe vp.PolicyEvaluator, cor statebased.CollectionResources) *Validator {
+	vpmgr := &statebased.KeyLevelValidationParameterManagerImpl{
+		StateFetcher:     s,
+		PolicyTranslator: &toApplicationPolicyTranslator{},
+	}
+	eval := statebased.NewV20Evaluator(vpmgr, pe, cor, s)
+	sbv := statebased.NewKeyLevelValidator(eval, vpmgr)
 
 	return &Validator{
 		capabilities:        c,
@@ -50,10 +89,10 @@ func New(c Capabilities, s StateFetcher, d IdentityDeserializer, pe PolicyEvalua
 // signatures against an endorsement policy that is supplied as argument to
 // every invoke
 type Validator struct {
-	deserializer        IdentityDeserializer
-	capabilities        Capabilities
-	stateFetcher        StateFetcher
-	policyEvaluator     PolicyEvaluator
+	deserializer        vi.IdentityDeserializer
+	capabilities        vc.Capabilities
+	stateFetcher        vs.StateFetcher
+	policyEvaluator     vp.PolicyEvaluator
 	stateBasedValidator StateBasedValidator
 }
 
@@ -73,20 +112,20 @@ func (vscc *Validator) extractValidationArtifacts(
 	actionPosition int,
 ) (*validationArtifacts, error) {
 	// get the envelope...
-	env, err := utils.GetEnvelopeFromBlock(block.Data.Data[txPosition])
+	env, err := protoutil.GetEnvelopeFromBlock(block.Data.Data[txPosition])
 	if err != nil {
 		logger.Errorf("VSCC error: GetEnvelope failed, err %s", err)
 		return nil, err
 	}
 
 	// ...and the payload...
-	payl, err := utils.GetPayload(env)
+	payl, err := protoutil.GetPayload(env)
 	if err != nil {
 		logger.Errorf("VSCC error: GetPayload failed, err %s", err)
 		return nil, err
 	}
 
-	chdr, err := utils.UnmarshalChannelHeader(payl.Header.ChannelHeader)
+	chdr, err := protoutil.UnmarshalChannelHeader(payl.Header.ChannelHeader)
 	if err != nil {
 		return nil, err
 	}
@@ -99,19 +138,19 @@ func (vscc *Validator) extractValidationArtifacts(
 	}
 
 	// ...and the transaction...
-	tx, err := utils.GetTransaction(payl.Data)
+	tx, err := protoutil.GetTransaction(payl.Data)
 	if err != nil {
 		logger.Errorf("VSCC error: GetTransaction failed, err %s", err)
 		return nil, err
 	}
 
-	cap, err := utils.GetChaincodeActionPayload(tx.Actions[actionPosition].Payload)
+	cap, err := protoutil.GetChaincodeActionPayload(tx.Actions[actionPosition].Payload)
 	if err != nil {
 		logger.Errorf("VSCC error: GetChaincodeActionPayload failed, err %s", err)
 		return nil, err
 	}
 
-	pRespPayload, err := utils.GetProposalResponsePayload(cap.Action.ProposalResponsePayload)
+	pRespPayload, err := protoutil.GetProposalResponsePayload(cap.Action.ProposalResponsePayload)
 	if err != nil {
 		err = fmt.Errorf("GetProposalResponsePayload error %s", err)
 		return nil, err
@@ -120,7 +159,7 @@ func (vscc *Validator) extractValidationArtifacts(
 		err = fmt.Errorf("nil pRespPayload.Extension")
 		return nil, err
 	}
-	respPayload, err := utils.GetChaincodeAction(pRespPayload.Extension)
+	respPayload, err := protoutil.GetChaincodeAction(pRespPayload.Extension)
 	if err != nil {
 		err = fmt.Errorf("GetChaincodeAction error %s", err)
 		return nil, err

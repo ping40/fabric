@@ -16,7 +16,7 @@ import (
 	"github.com/hyperledger/fabric/protos/common"
 	gossip_proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"google.golang.org/grpc"
 )
 
@@ -64,10 +64,9 @@ func (mock *MockGossipServiceAdapter) Gossip(msg *gossip_proto.GossipMessage) {
 // MockBlocksDeliverer mocking structure of BlocksDeliverer interface to initialize
 // the blocks provider implementation
 type MockBlocksDeliverer struct {
-	DisconnectCalled           chan struct{}
-	DisconnectAndDisableCalled chan struct{}
-	CloseCalled                chan struct{}
-	Pos                        uint64
+	DisconnectCalled chan struct{}
+	CloseCalled      chan struct{}
+	Pos              uint64
 	grpc.ClientStream
 	recvCnt  int32
 	MockRecv func(mock *MockBlocksDeliverer) (*orderer.DeliverResponse, error)
@@ -109,7 +108,7 @@ func MockRecv(mock *MockBlocksDeliverer) (*orderer.DeliverResponse, error) {
 // Send sends the envelope with request for the blocks for ordering service
 // currently mocked and not doing anything
 func (mock *MockBlocksDeliverer) Send(env *common.Envelope) error {
-	payload, _ := utils.GetPayload(env)
+	payload, _ := protoutil.GetPayload(env)
 	seekInfo := &orderer.SeekInfo{}
 
 	proto.Unmarshal(payload.Data, seekInfo)
@@ -124,12 +123,8 @@ func (mock *MockBlocksDeliverer) Send(env *common.Envelope) error {
 	return nil
 }
 
-func (mock *MockBlocksDeliverer) Disconnect(disableEndpoint bool) {
-	if disableEndpoint {
-		mock.DisconnectAndDisableCalled <- struct{}{}
-	} else {
-		mock.DisconnectCalled <- struct{}{}
-	}
+func (mock *MockBlocksDeliverer) Disconnect() {
+	mock.DisconnectCalled <- struct{}{}
 }
 
 func (mock *MockBlocksDeliverer) Close() {

@@ -9,8 +9,10 @@ package chaincode_test
 import (
 	"testing"
 
+	"github.com/hyperledger/fabric/common/channelconfig"
 	commonledger "github.com/hyperledger/fabric/common/ledger"
 	"github.com/hyperledger/fabric/core/chaincode"
+	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/common/privdata"
 	"github.com/hyperledger/fabric/core/container/ccintf"
 	"github.com/hyperledger/fabric/core/ledger"
@@ -63,11 +65,14 @@ type packageProvider interface {
 	chaincode.PackageProvider
 }
 
-// This is a bit weird, we need to import the chaincode/lifecycle package, but there is an error,
-// even if we alias it to another name, so, calling 'lifecycleIface' instead of 'lifecycle'
-//go:generate counterfeiter -o mock/lifecycle.go --fake-name Lifecycle . lifecycleIface
-type lifecycleIface interface {
+//go:generate counterfeiter -o mock/lifecycle.go --fake-name Lifecycle . lifecycle
+type lifecycle interface {
 	chaincode.Lifecycle
+}
+
+//go:generate counterfeiter -o mock/chaincode_definition.go --fake-name ChaincodeDefinition . chaincodeDefinition
+type chaincodeDefinition interface {
+	ccprovider.ChaincodeDefinition
 }
 
 //go:generate counterfeiter -o mock/chaincode_stream.go --fake-name ChaincodeStream . chaincodeStream
@@ -145,4 +150,14 @@ type applicationConfigRetriever interface {
 //go:generate counterfeiter -o mock/collection_store.go --fake-name CollectionStore . collectionStore
 type collectionStore interface {
 	privdata.CollectionStore
+}
+
+//go:generate counterfeiter -o mock/application_capabilities.go --fake-name ApplicationCapabilities . applicationCapabilities
+type applicationCapabilities interface {
+	channelconfig.ApplicationCapabilities
+}
+
+//go:generate counterfeiter -o mock/application_config.go --fake-name ApplicationConfig . applicationConfig
+type applicationConfig interface {
+	channelconfig.Application
 }

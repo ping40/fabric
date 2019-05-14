@@ -10,6 +10,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/flogging"
 	cb "github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protoutil"
 )
 
 // blockCreator holds number and hash of latest block
@@ -34,12 +35,12 @@ func (bc *blockCreator) createNextBlock(envs []*cb.Envelope) *cb.Block {
 		}
 	}
 
-	block := cb.NewBlock(bc.number+1, bc.hash)
-	block.Header.DataHash = data.Hash()
-	block.Data = data
-
-	bc.hash = block.Header.Hash()
 	bc.number++
 
+	block := protoutil.NewBlock(bc.number, bc.hash)
+	block.Header.DataHash = protoutil.BlockDataHash(data)
+	block.Data = data
+
+	bc.hash = protoutil.BlockHeaderHash(block.Header)
 	return block
 }

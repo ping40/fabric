@@ -14,7 +14,7 @@ import (
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -60,7 +60,7 @@ func (c *simpleCollectionStore) retrieveCollectionConfigPackage(cc common.Collec
 	if qe == nil {
 		qe, err = c.s.GetQueryExecutorForLedger(cc.Channel)
 		if err != nil {
-			return nil, errors.WithMessage(err, fmt.Sprintf("could not retrieve query executor for collection criteria %#v", cc))
+			return nil, errors.WithMessagef(err, "could not retrieve query executor for collection criteria %#v", cc)
 		}
 		defer qe.Done()
 	}
@@ -79,7 +79,7 @@ func RetrieveCollectionConfigPackageFromState(cc common.CollectionCriteria, stat
 
 	cb, err := state.GetState("lscc", BuildCollectionKVSKey(cc.Namespace))
 	if err != nil {
-		return nil, errors.WithMessage(err, fmt.Sprintf("error while retrieving collection for collection criteria %#v", cc))
+		return nil, errors.WithMessagef(err, "error while retrieving collection for collection criteria %#v", cc)
 	}
 	if cb == nil {
 		return nil, NoSuchCollectionError(cc)
@@ -107,7 +107,7 @@ func (c *simpleCollectionStore) retrieveCollectionConfig(cc common.CollectionCri
 	if qe == nil {
 		qe, err = c.s.GetQueryExecutorForLedger(cc.Channel)
 		if err != nil {
-			return nil, errors.WithMessage(err, fmt.Sprintf("could not retrieve query executor for collection criteria %#v", cc))
+			return nil, errors.WithMessagef(err, "could not retrieve query executor for collection criteria %#v", cc)
 		}
 		defer qe.Done()
 	}
@@ -129,7 +129,7 @@ func (c *simpleCollectionStore) retrieveSimpleCollection(cc common.CollectionCri
 	sc := &SimpleCollection{}
 	err = sc.Setup(staticCollectionConfig, c.s.GetIdentityDeserializer(cc.Channel))
 	if err != nil {
-		return nil, errors.WithMessage(err, fmt.Sprintf("error setting up collection for collection criteria %#v", cc))
+		return nil, errors.WithMessagef(err, "error setting up collection for collection criteria %#v", cc)
 	}
 	return sc, nil
 }
@@ -206,18 +206,18 @@ func isCreatorOfProposalAMember(signedProposal *pb.SignedProposal, collection *S
 	return accessFilter(signedData), nil
 }
 
-func getSignedData(signedProposal *pb.SignedProposal) (common.SignedData, error) {
-	proposal, err := utils.GetProposal(signedProposal.ProposalBytes)
+func getSignedData(signedProposal *pb.SignedProposal) (protoutil.SignedData, error) {
+	proposal, err := protoutil.GetProposal(signedProposal.ProposalBytes)
 	if err != nil {
-		return common.SignedData{}, err
+		return protoutil.SignedData{}, err
 	}
 
-	creator, _, err := utils.GetChaincodeProposalContext(proposal)
+	creator, _, err := protoutil.GetChaincodeProposalContext(proposal)
 	if err != nil {
-		return common.SignedData{}, err
+		return protoutil.SignedData{}, err
 	}
 
-	return common.SignedData{
+	return protoutil.SignedData{
 		Data:      signedProposal.ProposalBytes,
 		Identity:  creator,
 		Signature: signedProposal.Signature,

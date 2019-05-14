@@ -8,6 +8,7 @@ package validation
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/golang/protobuf/proto"
@@ -17,7 +18,7 @@ import (
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/peer"
 	"github.com/hyperledger/fabric/protos/token"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -34,13 +35,13 @@ func createTestTransactionEnvelope(channel string, response *peer.Response, simR
 	}
 
 	// endorse it to get a proposal response
-	presp, err := utils.CreateProposalResponse(prop.Header, prop.Payload, response, simRes, nil, getChaincodeID(), nil, signer)
+	presp, err := protoutil.CreateProposalResponse(prop.Header, prop.Payload, response, simRes, nil, getChaincodeID(), nil, signer)
 	if err != nil {
 		return nil, fmt.Errorf("CreateProposalResponse failed, err %s", err)
 	}
 
 	// assemble a transaction from that proposal and endorsement
-	tx, err := utils.CreateSignedTx(prop, signer, presp)
+	tx, err := protoutil.CreateSignedTx(prop, signer, presp)
 	if err != nil {
 		return nil, fmt.Errorf("CreateSignedTx failed, err %s", err)
 	}
@@ -56,7 +57,7 @@ func createTestProposalAndSignedProposal(channel string) (*peer.Proposal, *peer.
 	}
 
 	// sign it
-	sProp, err := utils.GetSignedProposal(prop, signer)
+	sProp, err := protoutil.GetSignedProposal(prop, signer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetSignedProposal failed, err %s", err)
 	}
@@ -72,14 +73,14 @@ func protoMarshal(t *testing.T, m proto.Message) []byte {
 // getTokenTransaction returns a valid token transaction
 func getTokenTransaction() *token.TokenTransaction {
 	return &token.TokenTransaction{
-		Action: &token.TokenTransaction_PlainAction{
-			PlainAction: &token.PlainTokenAction{
-				Data: &token.PlainTokenAction_PlainImport{
-					PlainImport: &token.PlainImport{
-						Outputs: []*token.PlainOutput{{
-							Owner:    []byte("token-owner"),
+		Action: &token.TokenTransaction_TokenAction{
+			TokenAction: &token.TokenAction{
+				Data: &token.TokenAction_Issue{
+					Issue: &token.Issue{
+						Outputs: []*token.Token{{
+							Owner:    &token.TokenOwner{Raw: []byte("token-owner")},
 							Type:     "PDQ",
-							Quantity: 777,
+							Quantity: ToHex(777),
 						}},
 					},
 				},
@@ -97,7 +98,7 @@ func createTestHeader(t *testing.T, txType common.HeaderType, channelId string, 
 	txid := "bad"
 	if useGoodTxid {
 		var err error
-		txid, err = utils.ComputeTxID(nonce, creator)
+		txid, err = protoutil.ComputeTxID(nonce, creator)
 		assert.NoError(t, err)
 	}
 
@@ -144,7 +145,7 @@ func TestCheckSignatureFromCreator(t *testing.T) {
 	assert.NotNil(t, env)
 
 	// get the payload from the envelope
-	payload, err := utils.GetPayload(env)
+	payload, err := protoutil.GetPayload(env)
 	assert.NoError(t, err, "GetPayload returns err %s", err)
 
 	// validate the header
@@ -237,4 +238,8 @@ func TestValidateTransactionBadTokenTxID(t *testing.T) {
 	payload, code := ValidateTransaction(envelope, &config.MockApplicationCapabilities{})
 	assert.Equal(t, code, peer.TxValidationCode_BAD_PROPOSAL_TXID)
 	assert.Nil(t, payload)
+}
+
+func ToHex(q uint64) string {
+	return "0x" + strconv.FormatUint(q, 16)
 }

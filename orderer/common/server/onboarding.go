@@ -12,15 +12,15 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/channelconfig"
-	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
 	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/orderer/consensus/etcdraft"
 	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -30,13 +30,14 @@ const (
 )
 
 type replicationInitiator struct {
+	registerChain     func(chain string)
 	verifierRetriever cluster.VerifierRetriever
 	channelLister     cluster.ChannelLister
 	logger            *flogging.FabricLogger
 	secOpts           *comm.SecureOptions
 	conf              *localconfig.TopLevel
 	lf                cluster.LedgerFactory
-	signer            crypto.LocalSigner
+	signer            identity.SignerSerializer
 }
 
 func (ri *replicationInitiator) replicateIfNeeded(bootstrapBlock *common.Block) {
@@ -49,7 +50,7 @@ func (ri *replicationInitiator) replicateIfNeeded(bootstrapBlock *common.Block) 
 
 func (ri *replicationInitiator) createReplicator(bootstrapBlock *common.Block, filter func(string) bool) *cluster.Replicator {
 	consenterCert := etcdraft.ConsenterCertificate(ri.secOpts.Certificate)
-	systemChannelName, err := utils.GetChainIDFromBlock(bootstrapBlock)
+	systemChannelName, err := protoutil.GetChainIDFromBlock(bootstrapBlock)
 	if err != nil {
 		ri.logger.Panicf("Failed extracting system channel name from bootstrap block: %v", err)
 	}
@@ -148,6 +149,7 @@ type ChainReplicator interface {
 
 // inactiveChainReplicator tracks disabled chains and replicates them upon demand
 type inactiveChainReplicator struct {
+	registerChain                     func(chain string)
 	logger                            *flogging.FabricLogger
 	retrieveLastSysChannelConfigBlock func() *common.Block
 	replicator                        ChainReplicator
@@ -210,6 +212,13 @@ func (dc *inactiveChainReplicator) replicateDisabledChains() {
 		dc.logger.Debugf("No inactive chains to try to replicate")
 		return
 	}
+
+	// For each chain, ensure we registered it into the verifier registry, otherwise
+	// we won't be able to verify its blocks.
+	for _, chain := range chains {
+		dc.registerChain(chain)
+	}
+
 	dc.logger.Infof("Found %d inactive chains: %v", len(chains), chains)
 	lastSystemChannelConfigBlock := dc.retrieveLastSysChannelConfigBlock()
 	replicatedChains := dc.replicator.ReplicateChains(lastSystemChannelConfigBlock, chains)
@@ -273,45 +282,52 @@ func (vl *verifierLoader) loadVerifiers() verifiersByChannel {
 	res := make(verifiersByChannel)
 
 	for _, chain := range vl.ledgerFactory.ChainIDs() {
-		ledger, err := vl.ledgerFactory.GetOrCreate(chain)
-		if err != nil {
-			vl.logger.Panicf("Failed obtaining ledger for channel %s", chain)
-			return nil
-		}
-
-		blockRetriever := &blockGetter{ledger: ledger}
-		height := ledger.Height()
-		if height == 0 {
-			vl.logger.Infof("Channel %s has no blocks, skipping it", chain)
+		v := vl.loadVerifier(chain)
+		if v == nil {
 			continue
 		}
-		lastBlockIndex := height - 1
-		lastBlock := blockRetriever.Block(lastBlockIndex)
-		if lastBlock == nil {
-			vl.logger.Panicf("Failed retrieving block %d for channel %s", lastBlockIndex, chain)
-		}
-
-		lastConfigBlock, err := cluster.LastConfigBlock(lastBlock, blockRetriever)
-		if err != nil {
-			vl.logger.Panicf("Failed retrieving config block %d for channel %s", lastBlockIndex, chain)
-		}
-		conf, err := cluster.ConfigFromBlock(lastConfigBlock)
-		if err != nil {
-			vl.onFailure(lastConfigBlock)
-			vl.logger.Panicf("Failed extracting configuration for channel %s from block %d: %v",
-				chain, lastConfigBlock.Header.Number, err)
-		}
-
-		verifier, err := vl.verifierFactory.VerifierFromConfig(conf, chain)
-		if err != nil {
-			vl.onFailure(lastConfigBlock)
-			vl.logger.Panicf("Failed creating verifier for channel %s from block %d: %v", chain, lastBlockIndex, err)
-		}
-		vl.logger.Infof("Loaded verifier for channel %s from config block at index %d", chain, lastBlockIndex)
-		res[chain] = verifier
+		res[chain] = v
 	}
 
 	return res
+}
+
+func (vl *verifierLoader) loadVerifier(chain string) cluster.BlockVerifier {
+	ledger, err := vl.ledgerFactory.GetOrCreate(chain)
+	if err != nil {
+		vl.logger.Panicf("Failed obtaining ledger for channel %s", chain)
+	}
+
+	blockRetriever := &blockGetter{ledger: ledger}
+	height := ledger.Height()
+	if height == 0 {
+		vl.logger.Errorf("Channel %s has no blocks, skipping it", chain)
+		return nil
+	}
+	lastBlockIndex := height - 1
+	lastBlock := blockRetriever.Block(lastBlockIndex)
+	if lastBlock == nil {
+		vl.logger.Panicf("Failed retrieving block [%d] for channel %s", lastBlockIndex, chain)
+	}
+
+	lastConfigBlock, err := cluster.LastConfigBlock(lastBlock, blockRetriever)
+	if err != nil {
+		vl.logger.Panicf("Failed retrieving config block [%d] for channel %s", lastBlockIndex, chain)
+	}
+	conf, err := cluster.ConfigFromBlock(lastConfigBlock)
+	if err != nil {
+		vl.onFailure(lastConfigBlock)
+		vl.logger.Panicf("Failed extracting configuration for channel %s from block [%d]: %v",
+			chain, lastConfigBlock.Header.Number, err)
+	}
+
+	verifier, err := vl.verifierFactory.VerifierFromConfig(conf, chain)
+	if err != nil {
+		vl.onFailure(lastConfigBlock)
+		vl.logger.Panicf("Failed creating verifier for channel %s from block [%d]: %v", chain, lastBlockIndex, err)
+	}
+	vl.logger.Infof("Loaded verifier for channel %s from config block at index %d", chain, lastBlockIndex)
+	return verifier
 }
 
 // ValidateBootstrapBlock returns whether this block can be used as a bootstrap block.

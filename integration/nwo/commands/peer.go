@@ -43,6 +43,7 @@ func (c ChannelCreate) Args() []string {
 		"--orderer", c.Orderer,
 		"--file", c.File,
 		"--outputBlock", c.OutputBlock,
+		"--timeout", "15s",
 	}
 }
 
@@ -88,22 +89,23 @@ func (c ChannelFetch) Args() []string {
 	return args
 }
 
-type ChaincodePackagePlusLifecycle struct {
+type ChaincodePackageLifecycle struct {
 	Path       string
 	Lang       string
+	Label      string
 	OutputFile string
 }
 
-func (c ChaincodePackagePlusLifecycle) SessionName() string {
-	return "peer-chaincode-package"
+func (c ChaincodePackageLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-package"
 }
 
-func (c ChaincodePackagePlusLifecycle) Args() []string {
+func (c ChaincodePackageLifecycle) Args() []string {
 	args := []string{
-		"chaincode", "package",
-		"--newLifecycle",
+		"lifecycle", "chaincode", "package",
 		"--path", c.Path,
 		"--lang", c.Lang,
+		"--label", c.Label,
 		c.OutputFile,
 	}
 
@@ -138,22 +140,17 @@ func (c ChaincodePackage) Args() []string {
 	return args
 }
 
-type ChaincodeInstallPlusLifecycle struct {
-	Name        string
-	Version     string
+type ChaincodeInstallLifecycle struct {
 	PackageFile string
 }
 
-func (c ChaincodeInstallPlusLifecycle) SessionName() string {
-	return "peer-chaincode-install"
+func (c ChaincodeInstallLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-install"
 }
 
-func (c ChaincodeInstallPlusLifecycle) Args() []string {
+func (c ChaincodeInstallLifecycle) Args() []string {
 	args := []string{
-		"chaincode", "install",
-		"--newLifecycle",
-		"--name", c.Name,
-		"--version", c.Version,
+		"lifecycle", "chaincode", "install",
 		c.PackageFile,
 	}
 
@@ -196,6 +193,148 @@ func (c ChaincodeInstall) Args() []string {
 	return args
 }
 
+type ChaincodeApproveForMyOrgLifecycle struct {
+	ChannelID           string
+	Orderer             string
+	Name                string
+	Version             string
+	PackageID           string
+	Sequence            string
+	EndorsementPlugin   string
+	ValidationPlugin    string
+	SignaturePolicy     string
+	ChannelConfigPolicy string
+	InitRequired        bool
+	CollectionsConfig   string
+	PeerAddresses       []string
+	WaitForEvent        bool
+}
+
+func (c ChaincodeApproveForMyOrgLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-approveformyorg"
+}
+
+func (c ChaincodeApproveForMyOrgLifecycle) Args() []string {
+	args := []string{
+		"lifecycle", "chaincode", "approveformyorg",
+		"--channelID", c.ChannelID,
+		"--orderer", c.Orderer,
+		"--name", c.Name,
+		"--version", c.Version,
+		"--package-id", c.PackageID,
+		"--sequence", c.Sequence,
+		"--endorsement-plugin", c.EndorsementPlugin,
+		"--validation-plugin", c.ValidationPlugin,
+		"--signature-policy", c.SignaturePolicy,
+		"--channel-config-policy", c.ChannelConfigPolicy,
+	}
+
+	if c.InitRequired {
+		args = append(args, "--init-required")
+	}
+
+	if c.CollectionsConfig != "" {
+		args = append(args, "--collections-config", c.CollectionsConfig)
+	}
+
+	for _, p := range c.PeerAddresses {
+		args = append(args, "--peerAddresses", p)
+	}
+
+	return args
+}
+
+type ChaincodeQueryApprovalStatusLifecycle struct {
+	ChannelID           string
+	Name                string
+	Version             string
+	Sequence            string
+	EndorsementPlugin   string
+	ValidationPlugin    string
+	SignaturePolicy     string
+	ChannelConfigPolicy string
+	InitRequired        bool
+	CollectionsConfig   string
+	PeerAddresses       []string
+}
+
+func (c ChaincodeQueryApprovalStatusLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-queryapprovalstatus"
+}
+
+func (c ChaincodeQueryApprovalStatusLifecycle) Args() []string {
+	args := []string{
+		"lifecycle", "chaincode", "queryapprovalstatus",
+		"--channelID", c.ChannelID,
+		"--name", c.Name,
+		"--version", c.Version,
+		"--sequence", c.Sequence,
+		"--endorsement-plugin", c.EndorsementPlugin,
+		"--validation-plugin", c.ValidationPlugin,
+		"--signature-policy", c.SignaturePolicy,
+		"--channel-config-policy", c.ChannelConfigPolicy,
+	}
+
+	if c.InitRequired {
+		args = append(args, "--init-required")
+	}
+
+	if c.CollectionsConfig != "" {
+		args = append(args, "--collections-config", c.CollectionsConfig)
+	}
+
+	for _, p := range c.PeerAddresses {
+		args = append(args, "--peerAddresses", p)
+	}
+
+	return args
+}
+
+type ChaincodeCommitLifecycle struct {
+	ChannelID           string
+	Orderer             string
+	Name                string
+	Version             string
+	Sequence            string
+	EndorsementPlugin   string
+	ValidationPlugin    string
+	SignaturePolicy     string
+	ChannelConfigPolicy string
+	InitRequired        bool
+	CollectionsConfig   string
+	PeerAddresses       []string
+	WaitForEvent        bool
+}
+
+func (c ChaincodeCommitLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-commit"
+}
+
+func (c ChaincodeCommitLifecycle) Args() []string {
+	args := []string{
+		"lifecycle", "chaincode", "commit",
+		"--channelID", c.ChannelID,
+		"--orderer", c.Orderer,
+		"--name", c.Name,
+		"--version", c.Version,
+		"--sequence", c.Sequence,
+		"--endorsement-plugin", c.EndorsementPlugin,
+		"--validation-plugin", c.ValidationPlugin,
+		"--signature-policy", c.SignaturePolicy,
+		"--channel-config-policy", c.ChannelConfigPolicy,
+	}
+	if c.InitRequired {
+		args = append(args, "--init-required")
+	}
+	for _, p := range c.PeerAddresses {
+		args = append(args, "--peerAddresses", p)
+	}
+	if c.CollectionsConfig != "" {
+		args = append(args, "--collections-config", c.CollectionsConfig)
+	}
+	return args
+}
+
 type ChaincodeInstantiate struct {
 	ChannelID         string
 	Orderer           string
@@ -232,15 +371,15 @@ func (c ChaincodeInstantiate) Args() []string {
 	return args
 }
 
-type ChaincodeListInstalledPlusLifecycle struct{}
+type ChaincodeQueryInstalledLifecycle struct{}
 
-func (c ChaincodeListInstalledPlusLifecycle) SessionName() string {
-	return "peer-chaincode-list-installed-+lifecycle"
+func (c ChaincodeQueryInstalledLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-queryinstalled"
 }
 
-func (c ChaincodeListInstalledPlusLifecycle) Args() []string {
+func (c ChaincodeQueryInstalledLifecycle) Args() []string {
 	return []string{
-		"chaincode", "list", "--installed", "--newLifecycle",
+		"lifecycle", "chaincode", "queryinstalled",
 	}
 }
 
@@ -253,6 +392,23 @@ func (c ChaincodeListInstalled) SessionName() string {
 func (c ChaincodeListInstalled) Args() []string {
 	return []string{
 		"chaincode", "list", "--installed",
+	}
+}
+
+type ChaincodeListCommittedLifecycle struct {
+	ChannelID string
+	Name      string
+}
+
+func (c ChaincodeListCommittedLifecycle) SessionName() string {
+	return "peer-lifecycle-chaincode-querycommitted"
+}
+
+func (c ChaincodeListCommittedLifecycle) Args() []string {
+	return []string{
+		"lifecycle", "chaincode", "querycommitted",
+		"--channelID", c.ChannelID,
+		"--name", c.Name,
 	}
 }
 
@@ -297,6 +453,7 @@ type ChaincodeInvoke struct {
 	Ctor          string
 	PeerAddresses []string
 	WaitForEvent  bool
+	IsInit        bool
 }
 
 func (c ChaincodeInvoke) SessionName() string {
@@ -316,6 +473,9 @@ func (c ChaincodeInvoke) Args() []string {
 	}
 	if c.WaitForEvent {
 		args = append(args, "--waitForEvent")
+	}
+	if c.IsInit {
+		args = append(args, "--isInit")
 	}
 	return args
 }

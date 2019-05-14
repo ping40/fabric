@@ -9,8 +9,10 @@ package cluster_test
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +21,9 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
 	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric/common/metrics"
+	"github.com/hyperledger/fabric/common/metrics/disabled"
+	"github.com/hyperledger/fabric/common/metrics/metricsfakes"
 	comm_utils "github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
 	"github.com/hyperledger/fabric/orderer/common/cluster/mocks"
@@ -28,6 +33,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 )
 
@@ -53,6 +60,13 @@ var (
 		Channel: "test",
 		Payload: &common.Envelope{
 			Payload: []byte("test"),
+		},
+	}
+
+	testReq2 = &orderer.SubmitRequest{
+		Channel: testChannel2,
+		Payload: &common.Envelope{
+			Payload: []byte(testChannel2),
 		},
 	}
 
@@ -114,7 +128,9 @@ func (*mockChannelExtractor) TargetChannel(msg proto.Message) string {
 }
 
 type clusterNode struct {
-	freezeWG     sync.WaitGroup
+	lock         sync.Mutex
+	frozen       bool
+	freezeCond   sync.Cond
 	dialer       *cluster.PredicateDialer
 	handler      *mocks.Handler
 	nodeInfo     cluster.RemoteNode
@@ -126,7 +142,7 @@ type clusterNode struct {
 }
 
 func (cn *clusterNode) Step(stream orderer.Cluster_StepServer) error {
-	cn.freezeWG.Wait()
+	cn.waitIfFrozen()
 	req, err := stream.Recv()
 	if err != nil {
 		return err
@@ -140,12 +156,28 @@ func (cn *clusterNode) Step(stream orderer.Cluster_StepServer) error {
 	return stream.Send(&orderer.StepResponse{})
 }
 
+func (cn *clusterNode) waitIfFrozen() {
+	cn.lock.Lock()
+	// There is no freeze after an unfreeze so no need
+	// for a for loop.
+	if cn.frozen {
+		cn.freezeCond.Wait()
+		return
+	}
+	cn.lock.Unlock()
+}
+
 func (cn *clusterNode) freeze() {
-	cn.freezeWG.Add(1)
+	cn.lock.Lock()
+	defer cn.lock.Unlock()
+	cn.frozen = true
 }
 
 func (cn *clusterNode) unfreeze() {
-	cn.freezeWG.Done()
+	cn.lock.Lock()
+	cn.frozen = false
+	cn.lock.Unlock()
+	cn.freezeCond.Broadcast()
 }
 
 func (cn *clusterNode) resurrect() {
@@ -179,12 +211,11 @@ func (cn *clusterNode) renewCertificates() {
 	cn.serverConfig.SecOpts.Certificate = serverKeyPair.Cert
 	cn.serverConfig.SecOpts.Key = serverKeyPair.Key
 
-	cn.clientConfig.SecOpts.Key = clientKeyPair.Key
-	cn.clientConfig.SecOpts.Certificate = clientKeyPair.Cert
-	cn.dialer.SetConfig(cn.clientConfig)
+	cn.dialer.Config.SecOpts.Key = clientKeyPair.Key
+	cn.dialer.Config.SecOpts.Certificate = clientKeyPair.Cert
 }
 
-func newTestNode(t *testing.T) *clusterNode {
+func newTestNodeWithMetrics(t *testing.T, metrics cluster.MetricsProvider, tlsConnGauge metrics.Gauge) *clusterNode {
 	serverKeyPair, err := ca.NewServerCertKeyPair("127.0.0.1")
 	assert.NoError(t, err)
 
@@ -204,7 +235,9 @@ func newTestNode(t *testing.T) *clusterNode {
 		},
 	}
 
-	dialer := cluster.NewTLSPinningDialer(clientConfig)
+	dialer := &cluster.PredicateDialer{
+		Config: clientConfig,
+	}
 
 	srvConfig := comm_utils.ServerConfig{
 		SecOpts: &comm_utils.SecureOptions{
@@ -231,18 +264,26 @@ func newTestNode(t *testing.T) *clusterNode {
 		srv: gRPCServer,
 	}
 
+	tstSrv.freezeCond.L = &tstSrv.lock
+
 	tstSrv.c = &cluster.Comm{
-		SendBufferSize: 1,
-		Logger:         flogging.MustGetLogger("test"),
-		Chan2Members:   make(cluster.MembersByChannel),
-		H:              handler,
-		ChanExt:        channelExtractor,
-		Connections:    cluster.NewConnectionStore(dialer),
+		CertExpWarningThreshold: time.Hour,
+		SendBufferSize:          1,
+		Logger:                  flogging.MustGetLogger("test"),
+		Chan2Members:            make(cluster.MembersByChannel),
+		H:                       handler,
+		ChanExt:                 channelExtractor,
+		Connections:             cluster.NewConnectionStore(dialer, tlsConnGauge),
+		Metrics:                 cluster.NewMetrics(metrics),
 	}
 
 	orderer.RegisterClusterServer(gRPCServer.Server(), tstSrv)
 	go gRPCServer.Start()
 	return tstSrv
+}
+
+func newTestNode(t *testing.T) *clusterNode {
+	return newTestNodeWithMetrics(t, &disabled.Provider{}, &disabled.Gauge{})
 }
 
 func TestSendBigMessage(t *testing.T) {
@@ -310,6 +351,11 @@ func TestSendBigMessage(t *testing.T) {
 	streams := map[uint64]*cluster.Stream{}
 
 	for _, node := range []*clusterNode{node2, node3, node4, node5} {
+		// Freeze the node, in order to block its Recv
+		node.freeze()
+	}
+
+	for _, node := range []*clusterNode{node2, node3, node4, node5} {
 		rm, err := node1.c.Remote(testChannel, node.nodeInfo.ID)
 		assert.NoError(t, err)
 
@@ -320,8 +366,6 @@ func TestSendBigMessage(t *testing.T) {
 	t0 := time.Now()
 	for _, node := range []*clusterNode{node2, node3, node4, node5} {
 		stream := streams[node.nodeInfo.ID]
-		// Freeze the node, in order to block its Recv
-		node.freeze()
 
 		t1 := time.Now()
 		err = stream.Send(wrappedMsg)
@@ -392,10 +436,13 @@ func TestBlockingSend(t *testing.T) {
 			fakeStream.On("Context", mock.Anything).Return(context.Background())
 			client.On("Step", mock.Anything).Return(fakeStream, nil).Once()
 
-			var unBlock sync.WaitGroup
-			unBlock.Add(1)
+			unBlock := make(chan struct{})
+			var sendInvoked sync.WaitGroup
+			sendInvoked.Add(1)
+			var once sync.Once
 			fakeStream.On("Send", mock.Anything).Run(func(_ mock.Arguments) {
-				unBlock.Wait()
+				once.Do(sendInvoked.Done)
+				<-unBlock
 			}).Return(errors.New("oops"))
 
 			stream, err := rm.NewStream(time.Hour)
@@ -406,14 +453,11 @@ func TestBlockingSend(t *testing.T) {
 			assert.NoError(t, err)
 
 			// The second once doesn't either.
-			// At this point, we have 1 goroutine which is blocked on Send(),
+			// After this point, we have 1 goroutine which is blocked on Send(),
 			// and one message in the buffer.
+			sendInvoked.Wait()
 			err = stream.Send(testCase.messageToSend)
-			if testCase.overflowErr == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.EqualError(t, err, testCase.overflowErr)
-			}
+			assert.NoError(t, err)
 
 			// The third blocks, so we need to unblock it ourselves
 			// in order for it to go through, unless the operation
@@ -421,15 +465,24 @@ func TestBlockingSend(t *testing.T) {
 			go func() {
 				time.Sleep(time.Second)
 				if testCase.streamUnblocks {
-					unBlock.Done()
+					close(unBlock)
 				}
 			}()
 
 			t1 := time.Now()
-			stream.Send(testCase.messageToSend)
+			err = stream.Send(testCase.messageToSend)
+			// The third send always overflows or blocks.
+			// If we expect to receive an overflow error - assert it.
+			if testCase.overflowErr != "" {
+				assert.EqualError(t, err, testCase.overflowErr)
+			}
 			elapsed := time.Since(t1)
 			t.Log("Elapsed time:", elapsed)
 			assert.True(t, elapsed > testCase.elapsedGreaterThan)
+
+			if !testCase.streamUnblocks {
+				close(unBlock)
+			}
 		})
 	}
 }
@@ -458,13 +511,11 @@ func TestUnavailableHosts(t *testing.T) {
 	// to a host that is down
 	node1 := newTestNode(t)
 
-	clientConfig, err := node1.dialer.ClientConfig()
-	assert.NoError(t, err)
+	clientConfig := node1.dialer.Config
 	// The below timeout makes sure that connection establishment is done
 	// asynchronously. Had it been synchronous, the Remote() call would be
 	// blocked for an hour.
 	clientConfig.Timeout = time.Hour
-	node1.dialer.SetConfig(clientConfig)
 	defer node1.stop()
 
 	node2 := newTestNode(t)
@@ -506,12 +557,12 @@ func TestStreamAbort(t *testing.T) {
 		{
 			testName:      "Evicted from membership",
 			membership:    nil,
-			expectedError: "rpc error",
+			expectedError: "rpc error: code = Canceled desc = context canceled",
 		},
 		{
 			testName:      "Changed TLS certificate",
 			membership:    []cluster.RemoteNode{invalidNodeInfo},
-			expectedError: "rpc error",
+			expectedError: "rpc error: code = Canceled desc = context canceled",
 		},
 	} {
 		t.Run(tst.testName, func(t *testing.T) {
@@ -530,33 +581,29 @@ func testStreamAbort(t *testing.T, node2 *clusterNode, newMembership []cluster.R
 	node1.c.Configure(testChannel2, []cluster.RemoteNode{node2.nodeInfo})
 	node2.c.Configure(testChannel2, []cluster.RemoteNode{node1.nodeInfo})
 
-	var waitForReconfigWG sync.WaitGroup
-	waitForReconfigWG.Add(1)
-
 	var streamCreated sync.WaitGroup
 	streamCreated.Add(1)
+
+	stopChan := make(chan struct{})
 
 	node2.handler.On("OnSubmit", testChannel, node1.nodeInfo.ID, mock.Anything).Once().Run(func(_ mock.Arguments) {
 		// Notify the stream was created
 		streamCreated.Done()
-		// Wait for reconfiguration to take place before returning, so that
-		// the Recv() would happen after reconfiguration
-		waitForReconfigWG.Wait()
+		// Wait for the test to finish
+		<-stopChan
 	}).Return(nil).Once()
 
 	rm1, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
 	assert.NoError(t, err)
-
-	errorChan := make(chan error)
 
 	go func() {
 		stream := assertEventualEstablishStream(t, rm1)
 		// Signal the reconfiguration
 		err = stream.Send(wrapSubmitReq(testReq))
 		assert.NoError(t, err)
-		_, err = stream.Recv()
+		_, err := stream.Recv()
 		assert.Contains(t, err.Error(), expectedError)
-		errorChan <- err
+		close(stopChan)
 	}()
 
 	go func() {
@@ -564,10 +611,9 @@ func testStreamAbort(t *testing.T, node2 *clusterNode, newMembership []cluster.R
 		streamCreated.Wait()
 		// Reconfigure the channel membership
 		node1.c.Configure(testChannel, newMembership)
-		waitForReconfigWG.Done()
 	}()
 
-	<-errorChan
+	<-stopChan
 }
 
 func TestDoubleReconfigure(t *testing.T) {
@@ -772,10 +818,8 @@ func TestReconnect(t *testing.T) {
 
 	node1 := newTestNode(t)
 	defer node1.stop()
-	conf, err := node1.dialer.ClientConfig()
-	assert.NoError(t, err)
+	conf := node1.dialer.Config
 	conf.Timeout = time.Hour
-	node1.dialer.SetConfig(conf)
 
 	node2 := newTestNode(t)
 	node2.handler.On("OnSubmit", testChannel, node1.nodeInfo.ID, mock.Anything).Return(nil)
@@ -1060,14 +1104,277 @@ func TestConnectionFailure(t *testing.T) {
 
 	dialer := &mocks.SecureDialer{}
 	dialer.On("Dial", mock.Anything, mock.Anything).Return(nil, errors.New("oops"))
-	node1.c.Connections = cluster.NewConnectionStore(dialer)
+	node1.c.Connections = cluster.NewConnectionStore(dialer, &disabled.Gauge{})
 	node1.c.Configure(testChannel, []cluster.RemoteNode{node2.nodeInfo})
 
 	_, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
 	assert.EqualError(t, err, "oops")
 }
 
-func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend *orderer.SubmitRequest) {
+type testMetrics struct {
+	fakeProvider        *mocks.MetricsProvider
+	egressQueueLength   metricsfakes.Gauge
+	egressQueueCapacity metricsfakes.Gauge
+	egressStreamCount   metricsfakes.Gauge
+	egressTLSConnCount  metricsfakes.Gauge
+	egressWorkerSize    metricsfakes.Gauge
+	ingressStreamsCount metricsfakes.Gauge
+	msgSendTime         metricsfakes.Histogram
+	msgDropCount        metricsfakes.Counter
+}
+
+func (tm *testMetrics) initialize() {
+	tm.egressQueueLength.WithReturns(&tm.egressQueueLength)
+	tm.egressQueueCapacity.WithReturns(&tm.egressQueueCapacity)
+	tm.egressStreamCount.WithReturns(&tm.egressStreamCount)
+	tm.egressTLSConnCount.WithReturns(&tm.egressTLSConnCount)
+	tm.egressWorkerSize.WithReturns(&tm.egressWorkerSize)
+	tm.ingressStreamsCount.WithReturns(&tm.ingressStreamsCount)
+	tm.msgSendTime.WithReturns(&tm.msgSendTime)
+	tm.msgDropCount.WithReturns(&tm.msgDropCount)
+
+	fakeProvider := tm.fakeProvider
+	fakeProvider.On("NewGauge", cluster.IngressStreamsCountOpts).Return(&tm.ingressStreamsCount)
+	fakeProvider.On("NewGauge", cluster.EgressQueueLengthOpts).Return(&tm.egressQueueLength)
+	fakeProvider.On("NewGauge", cluster.EgressQueueCapacityOpts).Return(&tm.egressQueueCapacity)
+	fakeProvider.On("NewGauge", cluster.EgressStreamsCountOpts).Return(&tm.egressStreamCount)
+	fakeProvider.On("NewGauge", cluster.EgressTLSConnectionCountOpts).Return(&tm.egressTLSConnCount)
+	fakeProvider.On("NewGauge", cluster.EgressWorkersOpts).Return(&tm.egressWorkerSize)
+	fakeProvider.On("NewCounter", cluster.MessagesDroppedCountOpts).Return(&tm.msgDropCount)
+	fakeProvider.On("NewHistogram", cluster.MessageSendTimeOpts).Return(&tm.msgSendTime)
+}
+
+func TestMetrics(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name        string
+		runTest     func(node1, node2 *clusterNode, testMetrics *testMetrics)
+		testMetrics *testMetrics
+	}{
+		{
+			name: "EgressQueueOccupancy",
+			runTest: func(node1, node2 *clusterNode, testMetrics *testMetrics) {
+				assertBiDiCommunication(t, node1, node2, testReq)
+				assert.Equal(t, []string{"host", node2.nodeInfo.Endpoint, "msg_type", "transaction", "channel", testChannel},
+					testMetrics.egressQueueLength.WithArgsForCall(0))
+				assert.Equal(t, float64(0), testMetrics.egressQueueLength.SetArgsForCall(0))
+				assert.Equal(t, float64(1), testMetrics.egressQueueCapacity.SetArgsForCall(0))
+
+				var messageReceived sync.WaitGroup
+				messageReceived.Add(1)
+				node2.handler.On("OnConsensus", testChannel, node1.nodeInfo.ID, mock.Anything).Run(func(args mock.Arguments) {
+					messageReceived.Done()
+				}).Return(nil)
+
+				rm, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
+				assert.NoError(t, err)
+
+				stream := assertEventualEstablishStream(t, rm)
+				stream.Send(testConsensusReq)
+				messageReceived.Wait()
+
+				assert.Equal(t, []string{"host", node2.nodeInfo.Endpoint, "msg_type", "consensus", "channel", testChannel},
+					testMetrics.egressQueueLength.WithArgsForCall(1))
+				assert.Equal(t, float64(0), testMetrics.egressQueueLength.SetArgsForCall(1))
+				assert.Equal(t, float64(1), testMetrics.egressQueueCapacity.SetArgsForCall(1))
+			},
+		},
+		{
+			name: "EgressStreamsCount",
+			runTest: func(node1, node2 *clusterNode, testMetrics *testMetrics) {
+				assertBiDiCommunication(t, node1, node2, testReq)
+				assert.Equal(t, 1, testMetrics.egressStreamCount.SetCallCount())
+				assert.Equal(t, 1, testMetrics.egressStreamCount.WithCallCount())
+				assert.Equal(t, []string{"channel", testChannel}, testMetrics.egressStreamCount.WithArgsForCall(0))
+
+				assertBiDiCommunicationForChannel(t, node1, node2, testReq2, testChannel2)
+				assert.Equal(t, 2, testMetrics.egressStreamCount.SetCallCount())
+				assert.Equal(t, 2, testMetrics.egressStreamCount.WithCallCount())
+				assert.Equal(t, []string{"channel", testChannel2}, testMetrics.egressStreamCount.WithArgsForCall(1))
+			},
+		},
+		{
+			name: "EgressTLSConnCount",
+			runTest: func(node1, node2 *clusterNode, testMetrics *testMetrics) {
+				assertBiDiCommunication(t, node1, node2, testReq)
+				assert.Equal(t, []string{"channel", testChannel}, testMetrics.egressStreamCount.WithArgsForCall(0))
+
+				assertBiDiCommunicationForChannel(t, node1, node2, testReq2, testChannel2)
+				assert.Equal(t, []string{"channel", testChannel2}, testMetrics.egressStreamCount.WithArgsForCall(1))
+
+				// A single TLS connection despite 2 streams
+				assert.Equal(t, float64(1), testMetrics.egressTLSConnCount.SetArgsForCall(0))
+				assert.Equal(t, 1, testMetrics.egressTLSConnCount.SetCallCount())
+			},
+		},
+		{
+			name: "EgressWorkerSize",
+			runTest: func(node1, node2 *clusterNode, testMetrics *testMetrics) {
+				assertBiDiCommunication(t, node1, node2, testReq)
+				assert.Equal(t, []string{"channel", testChannel}, testMetrics.egressStreamCount.WithArgsForCall(0))
+
+				assertBiDiCommunicationForChannel(t, node1, node2, testReq2, testChannel2)
+				assert.Equal(t, []string{"channel", testChannel2}, testMetrics.egressStreamCount.WithArgsForCall(1))
+
+				assert.Equal(t, float64(1), testMetrics.egressWorkerSize.SetArgsForCall(0))
+				assert.Equal(t, float64(1), testMetrics.egressWorkerSize.SetArgsForCall(1))
+			},
+		},
+		{
+			name: "MgSendTime",
+			runTest: func(node1, node2 *clusterNode, testMetrics *testMetrics) {
+				assertBiDiCommunication(t, node1, node2, testReq)
+				assert.Equal(t, []string{"host", node2.nodeInfo.Endpoint, "channel", testChannel},
+					testMetrics.msgSendTime.WithArgsForCall(0))
+
+				assert.Equal(t, 1, testMetrics.msgSendTime.ObserveCallCount())
+			},
+		},
+		{
+			name: "MsgDropCount",
+			runTest: func(node1, node2 *clusterNode, testMetrics *testMetrics) {
+				blockRecv := make(chan struct{})
+				wasReported := func() bool {
+					select {
+					case <-blockRecv:
+						return true
+					default:
+						return false
+					}
+				}
+				// When the drop count is reported, release the lock on the server side receive operation.
+				testMetrics.msgDropCount.AddStub = func(float642 float64) {
+					if !wasReported() {
+						close(blockRecv)
+					}
+				}
+
+				node2.handler.On("OnConsensus", testChannel, node1.nodeInfo.ID, mock.Anything).Run(func(args mock.Arguments) {
+					// Block until the message drop is reported
+					<-blockRecv
+				}).Return(nil)
+
+				rm, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
+				assert.NoError(t, err)
+
+				stream := assertEventualEstablishStream(t, rm)
+				// Send too many messages while the server side is not reading from the stream
+				for {
+					stream.Send(testConsensusReq)
+					if wasReported() {
+						break
+					}
+				}
+				assert.Equal(t, []string{"host", node2.nodeInfo.Endpoint, "channel", testChannel},
+					testMetrics.msgDropCount.WithArgsForCall(0))
+				assert.Equal(t, 1, testMetrics.msgDropCount.AddCallCount())
+			},
+		},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			fakeProvider := &mocks.MetricsProvider{}
+			testCase.testMetrics = &testMetrics{
+				fakeProvider: fakeProvider,
+			}
+
+			testCase.testMetrics.initialize()
+
+			node1 := newTestNodeWithMetrics(t, fakeProvider, &testCase.testMetrics.egressTLSConnCount)
+			defer node1.stop()
+
+			node2 := newTestNode(t)
+			defer node2.stop()
+
+			configForNode1 := []cluster.RemoteNode{node2.nodeInfo}
+			configForNode2 := []cluster.RemoteNode{node1.nodeInfo}
+			node1.c.Configure(testChannel, configForNode1)
+			node2.c.Configure(testChannel, configForNode2)
+			node1.c.Configure(testChannel2, configForNode1)
+			node2.c.Configure(testChannel2, configForNode2)
+
+			testCase.runTest(node1, node2, testCase.testMetrics)
+		})
+	}
+}
+
+func TestCertExpirationWarningEgress(t *testing.T) {
+	t.Parallel()
+	// Scenario: Ensures that when certificates are due to expire,
+	// a warning is logged to the log.
+
+	node1 := newTestNode(t)
+	node2 := newTestNode(t)
+
+	cert, err := x509.ParseCertificate(node2.nodeInfo.ServerTLSCert)
+	assert.NoError(t, err)
+	assert.NotNil(t, cert)
+
+	// Let the NotAfter time of the certificate be T1, the current time be T0.
+	// So time.Until is (T1 - T0), which means we have (T1 - T0) time left.
+	// We want to trigger a warning, so we set the warning threshold to be 20 seconds above
+	// the time left, so the time left would be smaller than the threshold.
+	node1.c.CertExpWarningThreshold = time.Until(cert.NotAfter) + time.Second*20
+	// We only alert once in 3 seconds
+	node1.c.MinimumExpirationWarningInterval = time.Second * 3
+
+	defer node1.stop()
+	defer node2.stop()
+
+	config := []cluster.RemoteNode{node1.nodeInfo, node2.nodeInfo}
+	node1.c.Configure(testChannel, config)
+	node2.c.Configure(testChannel, config)
+
+	stub, err := node1.c.Remote(testChannel, node2.nodeInfo.ID)
+	assert.NoError(t, err)
+
+	mockgRPC := &mocks.StepClient{}
+	mockgRPC.On("Send", mock.Anything).Return(nil)
+	mockgRPC.On("Context").Return(context.Background())
+	mockClient := &mocks.ClusterClient{}
+	mockClient.On("Step", mock.Anything).Return(mockgRPC, nil)
+
+	stub.Client = mockClient
+
+	stream := assertEventualEstablishStream(t, stub)
+
+	alerts := make(chan struct{}, 100)
+
+	stream.Logger = stream.Logger.WithOptions(zap.Hooks(func(entry zapcore.Entry) error {
+		if strings.Contains(entry.Message, "expires in less than") {
+			alerts <- struct{}{}
+		}
+		return nil
+	}))
+
+	// Send a message to the node and expert an alert to be logged.
+	stream.Send(wrapSubmitReq(testReq))
+	select {
+	case <-alerts:
+	case <-time.After(time.Second * 5):
+		t.Fatal("Should have logged an alert")
+	}
+	// Send another message, and ensure we don't log anything to the log, because the
+	// alerts should be suppressed before the minimum interval timeout expires.
+	stream.Send(wrapSubmitReq(testReq))
+	select {
+	case <-alerts:
+		t.Fatal("Should not have logged an alert")
+	case <-time.After(time.Millisecond * 500):
+	}
+	// Wait enough time for the alert interval to clear.
+	time.Sleep(node1.c.MinimumExpirationWarningInterval + time.Second)
+	// Send again a message, and this time it should be logged again.
+	stream.Send(wrapSubmitReq(testReq))
+	select {
+	case <-alerts:
+	case <-time.After(time.Second * 5):
+		t.Fatal("Should have logged an alert")
+	}
+}
+
+func assertBiDiCommunicationForChannel(t *testing.T, node1, node2 *clusterNode, msgToSend *orderer.SubmitRequest, channel string) {
 	for _, tst := range []struct {
 		label    string
 		sender   *clusterNode
@@ -1078,14 +1385,14 @@ func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend 
 		{label: "2->1", sender: node2, target: node1.nodeInfo.ID, receiver: node1},
 	} {
 		t.Run(tst.label, func(t *testing.T) {
-			stub, err := tst.sender.c.Remote(testChannel, tst.target)
+			stub, err := tst.sender.c.Remote(channel, tst.target)
 			assert.NoError(t, err)
 
 			stream := assertEventualEstablishStream(t, stub)
 
 			var wg sync.WaitGroup
 			wg.Add(1)
-			tst.receiver.handler.On("OnSubmit", testChannel, tst.sender.nodeInfo.ID, mock.Anything).Return(nil).Once().Run(func(args mock.Arguments) {
+			tst.receiver.handler.On("OnSubmit", channel, tst.sender.nodeInfo.ID, mock.Anything).Return(nil).Once().Run(func(args mock.Arguments) {
 				req := args.Get(2).(*orderer.SubmitRequest)
 				assert.True(t, proto.Equal(req, msgToSend))
 				wg.Done()
@@ -1097,6 +1404,10 @@ func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend 
 			wg.Wait()
 		})
 	}
+}
+
+func assertBiDiCommunication(t *testing.T, node1, node2 *clusterNode, msgToSend *orderer.SubmitRequest) {
+	assertBiDiCommunicationForChannel(t, node1, node2, msgToSend, testChannel)
 }
 
 func assertEventualEstablishStream(t *testing.T, rpc *cluster.RemoteContext) *cluster.Stream {

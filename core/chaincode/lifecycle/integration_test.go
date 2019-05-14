@@ -16,7 +16,7 @@ import (
 	cb "github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/ledger/queryresult"
 	lb "github.com/hyperledger/fabric/protos/peer/lifecycle"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -26,22 +26,29 @@ import (
 
 var _ = Describe("Integration", func() {
 	var (
-		l   *lifecycle.Lifecycle
-		scc *lifecycle.SCC
+		resources *lifecycle.Resources
+		ef        *lifecycle.ExternalFunctions
+		scc       *lifecycle.SCC
 
 		fakeChannelConfigSource *mock.ChannelConfigSource
 		fakeChannelConfig       *mock.ChannelConfig
 		fakeApplicationConfig   *mock.ApplicationConfig
+		fakeCapabilities        *mock.ApplicationCapabilities
 		fakeOrgConfig           *mock.ApplicationOrgConfig
 		fakeStub                *mock.ChaincodeStub
+		fakeACLProvider         *mock.ACLProvider
 
 		fakeOrgKVStore    map[string][]byte
 		fakePublicKVStore map[string][]byte
 	)
 
 	BeforeEach(func() {
-		l = &lifecycle.Lifecycle{
+		resources = &lifecycle.Resources{
 			Serializer: &lifecycle.Serializer{},
+		}
+
+		ef = &lifecycle.ExternalFunctions{
+			Resources: resources,
 		}
 
 		fakeChannelConfigSource = &mock.ChannelConfigSource{}
@@ -49,6 +56,10 @@ var _ = Describe("Integration", func() {
 		fakeChannelConfigSource.GetStableChannelConfigReturns(fakeChannelConfig)
 		fakeApplicationConfig = &mock.ApplicationConfig{}
 		fakeChannelConfig.ApplicationConfigReturns(fakeApplicationConfig, true)
+		fakeCapabilities = &mock.ApplicationCapabilities{}
+		fakeCapabilities.LifecycleV20Returns(true)
+		fakeApplicationConfig.CapabilitiesReturns(fakeCapabilities)
+		fakeACLProvider = &mock.ACLProvider{}
 
 		fakeOrgConfig = &mock.ApplicationOrgConfig{}
 		fakeOrgConfig.MSPIDReturns("fake-mspid")
@@ -61,15 +72,19 @@ var _ = Describe("Integration", func() {
 			Dispatcher: &dispatcher.Dispatcher{
 				Protobuf: &dispatcher.ProtobufImpl{},
 			},
-			Functions:           l,
+			Functions:           ef,
 			OrgMSPID:            "fake-mspid",
 			ChannelConfigSource: fakeChannelConfigSource,
+			ACLProvider:         fakeACLProvider,
 		}
 
 		fakePublicKVStore = map[string][]byte{}
 		fakeOrgKVStore = map[string][]byte{}
 
 		fakeStub = &mock.ChaincodeStub{}
+
+		fakeStub.GetChannelIDReturns("test-channel")
+
 		fakeStub.GetStateStub = func(key string) ([]byte, error) {
 			return fakePublicKVStore[key], nil
 		}
@@ -111,15 +126,21 @@ var _ = Describe("Integration", func() {
 		It("defines the chaincode for the org, defines it for the channel, queries all namespaces, and queries the chaincode", func() {
 			// Define for the org
 			fakeStub.GetArgsReturns([][]byte{
-				[]byte("DefineChaincodeForMyOrg"),
-				utils.MarshalOrPanic(&lb.DefineChaincodeForMyOrgArgs{
+				[]byte("ApproveChaincodeDefinitionForMyOrg"),
+				protoutil.MarshalOrPanic(&lb.ApproveChaincodeDefinitionForMyOrgArgs{
 					Name:                "cc-name",
 					Version:             "1.0",
 					Sequence:            1,
 					EndorsementPlugin:   "builtin",
 					ValidationPlugin:    "builtin",
 					ValidationParameter: []byte("validation-parameter"),
-					Hash:                []byte("hash-value"),
+					Source: &lb.ChaincodeSource{
+						Type: &lb.ChaincodeSource_LocalPackage{
+							LocalPackage: &lb.ChaincodeSource_Local{
+								PackageId: "hash-value",
+							},
+						},
+					},
 				}),
 			})
 			response := scc.Invoke(fakeStub)
@@ -127,28 +148,28 @@ var _ = Describe("Integration", func() {
 
 			// Define for the channel
 			fakeStub.GetArgsReturns([][]byte{
-				[]byte("DefineChaincode"),
-				utils.MarshalOrPanic(&lb.DefineChaincodeArgs{
+				[]byte("CommitChaincodeDefinition"),
+				protoutil.MarshalOrPanic(&lb.CommitChaincodeDefinitionArgs{
 					Name:                "cc-name",
 					Version:             "1.0",
 					Sequence:            1,
 					EndorsementPlugin:   "builtin",
 					ValidationPlugin:    "builtin",
 					ValidationParameter: []byte("validation-parameter"),
-					Hash:                []byte("hash-value"),
 				}),
 			})
 			response = scc.Invoke(fakeStub)
+			Expect(response.Message).To(Equal(""))
 			Expect(response.Status).To(Equal(int32(200)))
 
 			// Get channel definitions
 			fakeStub.GetArgsReturns([][]byte{
-				[]byte("QueryDefinedNamespaces"),
-				utils.MarshalOrPanic(&lb.QueryDefinedNamespacesArgs{}),
+				[]byte("QueryNamespaceDefinitions"),
+				protoutil.MarshalOrPanic(&lb.QueryNamespaceDefinitionsArgs{}),
 			})
 			response = scc.Invoke(fakeStub)
 			Expect(response.Status).To(Equal(int32(200)))
-			namespaceResult := &lb.QueryDefinedNamespacesResult{}
+			namespaceResult := &lb.QueryNamespaceDefinitionsResult{}
 			err := proto.Unmarshal(response.Payload, namespaceResult)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(len(namespaceResult.Namespaces)).To(Equal(1))
@@ -158,23 +179,22 @@ var _ = Describe("Integration", func() {
 
 			// Get chaincode definition details
 			fakeStub.GetArgsReturns([][]byte{
-				[]byte("QueryDefinedChaincode"),
-				utils.MarshalOrPanic(&lb.QueryDefinedChaincodeArgs{
+				[]byte("QueryChaincodeDefinition"),
+				protoutil.MarshalOrPanic(&lb.QueryChaincodeDefinitionArgs{
 					Name: "cc-name",
 				}),
 			})
 			response = scc.Invoke(fakeStub)
 			Expect(response.Status).To(Equal(int32(200)))
-			chaincodeResult := &lb.QueryDefinedChaincodeResult{}
+			chaincodeResult := &lb.QueryChaincodeDefinitionResult{}
 			err = proto.Unmarshal(response.Payload, chaincodeResult)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(proto.Equal(chaincodeResult, &lb.QueryDefinedChaincodeResult{
+			Expect(proto.Equal(chaincodeResult, &lb.QueryChaincodeDefinitionResult{
 				Sequence:            1,
 				Version:             "1.0",
 				EndorsementPlugin:   "builtin",
 				ValidationPlugin:    "builtin",
 				ValidationParameter: []byte("validation-parameter"),
-				Hash:                []byte("hash-value"),
 				Collections:         &cb.CollectionConfigPackage{},
 			})).To(BeTrue())
 		})

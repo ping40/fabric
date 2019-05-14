@@ -14,10 +14,9 @@ import (
 	"github.com/hyperledger/fabric/common/ledger/util"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/history/historydb"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
-	"github.com/hyperledger/fabric/core/ledger/ledgerconfig"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/ledger/queryresult"
-	putils "github.com/hyperledger/fabric/protos/utils"
+	protoutil "github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb/iterator"
 )
@@ -30,11 +29,6 @@ type LevelHistoryDBQueryExecutor struct {
 
 // GetHistoryForKey implements method in interface `ledger.HistoryQueryExecutor`
 func (q *LevelHistoryDBQueryExecutor) GetHistoryForKey(namespace string, key string) (commonledger.ResultsIterator, error) {
-
-	if ledgerconfig.IsHistoryDBEnabled() == false {
-		return nil, errors.New("history database not enabled")
-	}
-
 	var compositeStartKey []byte
 	var compositeEndKey []byte
 	compositeStartKey = historydb.ConstructPartialCompositeHistoryKey(namespace, key, false)
@@ -118,22 +112,22 @@ func getKeyModificationFromTran(tranEnvelope *common.Envelope, namespace string,
 	logger.Debugf("Entering getKeyModificationFromTran()\n", namespace, key)
 
 	// extract action from the envelope
-	payload, err := putils.GetPayload(tranEnvelope)
+	payload, err := protoutil.GetPayload(tranEnvelope)
 	if err != nil {
 		return nil, err
 	}
 
-	tx, err := putils.GetTransaction(payload.Data)
+	tx, err := protoutil.GetTransaction(payload.Data)
 	if err != nil {
 		return nil, err
 	}
 
-	_, respPayload, err := putils.GetPayloads(tx.Actions[0])
+	_, respPayload, err := protoutil.GetPayloads(tx.Actions[0])
 	if err != nil {
 		return nil, err
 	}
 
-	chdr, err := putils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 	if err != nil {
 		return nil, err
 	}

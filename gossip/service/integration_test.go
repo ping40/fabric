@@ -49,12 +49,12 @@ func (*transientStoreMock) PurgeByTxids(txids []string) error {
 type embeddingDeliveryService struct {
 	startOnce sync.Once
 	stopOnce  sync.Once
-	deliverclient.DeliverService
+	deliverservice.DeliverService
 	startSignal sync.WaitGroup
 	stopSignal  sync.WaitGroup
 }
 
-func newEmbeddingDeliveryService(ds deliverclient.DeliverService) *embeddingDeliveryService {
+func newEmbeddingDeliveryService(ds deliverservice.DeliverService) *embeddingDeliveryService {
 	eds := &embeddingDeliveryService{
 		DeliverService: ds,
 	}
@@ -93,7 +93,7 @@ type embeddingDeliveryServiceFactory struct {
 	DeliveryServiceFactory
 }
 
-func (edsf *embeddingDeliveryServiceFactory) Service(g GossipService, endpoints []string, mcs api.MessageCryptoService) (deliverclient.DeliverService, error) {
+func (edsf *embeddingDeliveryServiceFactory) Service(g GossipService, endpoints []string, mcs api.MessageCryptoService) (deliverservice.DeliverService, error) {
 	ds, _ := edsf.DeliveryServiceFactory.Service(g, endpoints, mcs)
 	return newEmbeddingDeliveryService(ds), nil
 }
@@ -119,21 +119,24 @@ func TestLeaderYield(t *testing.T) {
 	viper.Set("peer.gossip.useLeaderElection", true)
 	viper.Set("peer.gossip.orgLeader", false)
 	n := 2
-	portPrefix := 30000
-	gossips := startPeers(t, n, portPrefix, 0, 1)
+	gossips := startPeers(t, n, 0, 1)
 	defer stopPeers(gossips)
 	channelName := "channelA"
 	peerIndexes := []int{0, 1}
 	// Add peers to the channel
-	addPeersToChannel(t, n, portPrefix, channelName, gossips, peerIndexes)
+	addPeersToChannel(t, n, channelName, gossips, peerIndexes)
 	// Prime the membership view of the peers
-	waitForFullMembership(t, gossips, n, time.Second*30, time.Millisecond*100)
+	waitForFullMembershipOrFailNow(t, gossips, n, time.Second*30, time.Millisecond*100)
+
+	endpoint, socket := getAvailablePort(t)
+	socket.Close()
+
 	// Helper function that creates a gossipService instance
 	newGossipService := func(i int) *gossipServiceImpl {
-		gs := gossips[i].(*gossipServiceImpl)
+		gs := gossips[i].(*gossipGRPC).gossipServiceImpl
 		gs.deliveryFactory = &embeddingDeliveryServiceFactory{&deliveryFactoryImpl{}}
 		gossipServiceInstance = gs
-		gs.InitializeChannel(channelName, []string{"localhost:7050"}, Support{
+		gs.InitializeChannel(channelName, []string{endpoint}, Support{
 			Committer: &mockLedgerInfo{1},
 			Store:     &transientStoreMock{},
 		})
@@ -176,7 +179,7 @@ func TestLeaderYield(t *testing.T) {
 	for getLeader() != 1 && time.Now().Before(timeLimit) {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if time.Now().After(timeLimit) {
+	if time.Now().After(timeLimit) && getLeader() != 1 {
 		util.PrintStackTrace()
 		t.Fatalf("p1 hasn't taken over leadership within %v: %d", takeOverMaxTimeout, getLeader())
 	}

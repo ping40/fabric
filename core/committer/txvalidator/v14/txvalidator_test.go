@@ -27,8 +27,7 @@ import (
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
-	"github.com/spf13/viper"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -100,12 +99,11 @@ func TestDetectTXIdDuplicates(t *testing.T) {
 }
 
 func TestBlockValidationDuplicateTXId(t *testing.T) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
-	ledgermgmt.InitializeTestEnv()
-	defer ledgermgmt.CleanupTestEnv()
+	cleanup := ledgermgmt.InitializeTestEnv(t)
+	defer cleanup()
 
 	gb, _ := test.MakeGenesisBlock("TestLedger")
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := ledgermgmt.CreateLedger(gb)
 	defer ledger.Close()
 
@@ -161,12 +159,11 @@ func TestBlockValidationDuplicateTXId(t *testing.T) {
 }
 
 func TestBlockValidation(t *testing.T) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
-	ledgermgmt.InitializeTestEnv()
-	defer ledgermgmt.CleanupTestEnv()
+	cleanup := ledgermgmt.InitializeTestEnv(t)
+	defer cleanup()
 
 	gb, _ := test.MakeGenesisBlock("TestLedger")
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := ledgermgmt.CreateLedger(gb)
 	defer ledger.Close()
 
@@ -175,12 +172,11 @@ func TestBlockValidation(t *testing.T) {
 }
 
 func TestParallelBlockValidation(t *testing.T) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
-	ledgermgmt.InitializeTestEnv()
-	defer ledgermgmt.CleanupTestEnv()
+	cleanup := ledgermgmt.InitializeTestEnv(t)
+	defer cleanup()
 
 	gb, _ := test.MakeGenesisBlock("TestLedger")
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := ledgermgmt.CreateLedger(gb)
 	defer ledger.Close()
 
@@ -189,12 +185,11 @@ func TestParallelBlockValidation(t *testing.T) {
 }
 
 func TestVeryLargeParallelBlockValidation(t *testing.T) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
-	ledgermgmt.InitializeTestEnv()
-	defer ledgermgmt.CleanupTestEnv()
+	cleanup := ledgermgmt.InitializeTestEnv(t)
+	defer cleanup()
 
 	gb, _ := test.MakeGenesisBlock("TestLedger")
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := ledgermgmt.CreateLedger(gb)
 	defer ledger.Close()
 
@@ -205,9 +200,8 @@ func TestVeryLargeParallelBlockValidation(t *testing.T) {
 }
 
 func TestTxValidationFailure_InvalidTxid(t *testing.T) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/txvalidatortest")
-	ledgermgmt.InitializeTestEnv()
-	defer ledgermgmt.CleanupTestEnv()
+	cleanup := ledgermgmt.InitializeTestEnv(t)
+	defer cleanup()
 
 	gb, _ := test.MakeGenesisBlock("TestLedger")
 	ledger, _ := ledgermgmt.CreateLedger(gb)
@@ -229,12 +223,12 @@ func TestTxValidationFailure_InvalidTxid(t *testing.T) {
 	// Create simple endorsement transaction
 	payload := &common.Payload{
 		Header: &common.Header{
-			ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{
+			ChannelHeader: protoutil.MarshalOrPanic(&common.ChannelHeader{
 				TxId:      "INVALID TXID!!!",
 				Type:      int32(common.HeaderType_ENDORSER_TRANSACTION),
 				ChannelId: util2.GetTestChainID(),
 			}),
-			SignatureHeader: utils.MarshalOrPanic(&common.SignatureHeader{
+			SignatureHeader: protoutil.MarshalOrPanic(&common.SignatureHeader{
 				Nonce:   []byte("nonce"),
 				Creator: mockSignerSerialized,
 			}),
@@ -270,11 +264,11 @@ func TestTxValidationFailure_InvalidTxid(t *testing.T) {
 
 	block.Header = &common.BlockHeader{
 		Number:   0,
-		DataHash: block.Data.Hash(),
+		DataHash: protoutil.BlockDataHash(block.Data),
 	}
 
 	// Initialize metadata
-	utils.InitBlockMetadata(block)
+	protoutil.InitBlockMetadata(block)
 	txsFilter := util.NewTxValidationFlagsSetValue(len(block.Data.Data), peer.TxValidationCode_VALID)
 	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txsFilter
 
@@ -310,7 +304,7 @@ func createCCUpgradeEnvelope(chainID, chaincodeName, chaincodeVersion string, si
 	}
 
 	cds := &peer.ChaincodeDeploymentSpec{ChaincodeSpec: spec, CodePackage: []byte{}}
-	prop, _, err := utils.CreateUpgradeProposalFromCDS(chainID, cds, creator, []byte{}, []byte{}, []byte{}, nil)
+	prop, _, err := protoutil.CreateUpgradeProposalFromCDS(chainID, cds, creator, []byte{}, []byte{}, []byte{}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +316,7 @@ func createCCUpgradeEnvelope(chainID, chaincodeName, chaincodeVersion string, si
 		Endorsement: &peer.Endorsement{},
 	}
 
-	return utils.CreateSignedTx(prop, signer, proposalResponse)
+	return protoutil.CreateSignedTx(prop, signer, proposalResponse)
 }
 
 func TestGetTxCCInstance(t *testing.T) {
@@ -344,7 +338,7 @@ func TestGetTxCCInstance(t *testing.T) {
 	assert.NoError(t, err)
 
 	// get the payload from the envelope
-	payload, err := utils.GetPayload(env)
+	payload, err := protoutil.GetPayload(env)
 	assert.NoError(t, err)
 
 	expectInvokeCCIns := &sysccprovider.ChaincodeInstance{

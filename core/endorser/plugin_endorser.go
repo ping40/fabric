@@ -11,16 +11,22 @@ import (
 	"sync"
 
 	"github.com/hyperledger/fabric/core/chaincode/shim"
-	"github.com/hyperledger/fabric/core/handlers/endorsement/api"
+	endorsement "github.com/hyperledger/fabric/core/handlers/endorsement/api"
 	endorsement3 "github.com/hyperledger/fabric/core/handlers/endorsement/api/identities"
 	"github.com/hyperledger/fabric/core/transientstore"
 	pb "github.com/hyperledger/fabric/protos/peer"
-	putils "github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
+//go:generate mockery -dir . -name Store -case underscore -output mocks/
+
+// Store is local defined interface for mocking foreign interface transientstore.Store.
+type Store interface {
+	transientstore.Store
+}
+
 //go:generate mockery -dir . -name TransientStoreRetriever -case underscore -output mocks/
-//go:generate mockery -dir ../transientstore/ -name Store -case underscore -output mocks/
 
 // TransientStoreRetriever retrieves transient stores
 type TransientStoreRetriever interface {
@@ -203,7 +209,11 @@ func (pe *PluginEndorser) EndorseWithPlugin(ctx Context) (*pb.ProposalResponse, 
 	return resp, nil
 }
 
+<<<<<<< HEAD
 // getAndStorePlugin returns a plugin instance for the given plugin name and channel pingmodify
+=======
+// getOrCreatePlugin returns a plugin instance for the given plugin name and channel
+>>>>>>> upstream/master
 func (pe *PluginEndorser) getOrCreatePlugin(plugin PluginName, channel string) (endorsement.Plugin, error) {
 	pluginFactory := pe.PluginFactoryByName(plugin)
 	if pluginFactory == nil {
@@ -230,19 +240,19 @@ func (pe *PluginEndorser) getOrCreatePluginChannelMapping(plugin PluginName, pf 
 }
 
 func proposalResponsePayloadFromContext(ctx Context) ([]byte, error) {
-	hdr, err := putils.GetHeader(ctx.Proposal.Header)
+	hdr, err := protoutil.GetHeader(ctx.Proposal.Header)
 	if err != nil {
 		endorserLogger.Warning("Failed parsing header", err)
 		return nil, errors.Wrap(err, "failed parsing header")
 	}
 
-	pHashBytes, err := putils.GetProposalHash1(hdr, ctx.Proposal.Payload, ctx.Visibility)
+	pHashBytes, err := protoutil.GetProposalHash1(hdr, ctx.Proposal.Payload, ctx.Visibility)
 	if err != nil {
 		endorserLogger.Warning("Failed computing proposal hash", err)
 		return nil, errors.Wrap(err, "could not compute proposal hash")
 	}
 
-	prpBytes, err := putils.GetBytesProposalResponsePayload(pHashBytes, ctx.Response, ctx.SimRes, ctx.Event, ctx.ChaincodeID)
+	prpBytes, err := protoutil.GetBytesProposalResponsePayload(pHashBytes, ctx.Response, ctx.SimRes, ctx.Event, ctx.ChaincodeID)
 	if err != nil {
 		endorserLogger.Warning("Failed marshaling the proposal response payload to bytes", err)
 		return nil, errors.New("failure while marshaling the ProposalResponsePayload")

@@ -3,6 +3,7 @@ Copyright IBM Corp. All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
 */
+
 package client
 
 import (
@@ -12,14 +13,11 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/hyperledger/fabric/common/crypto"
-	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	tk "github.com/hyperledger/fabric/token"
 	"github.com/pkg/errors"
 )
-
-var logger = flogging.MustGetLogger("token.client")
 
 // TxSubmitter will submit token transactions to the orderer
 // and create a channel to write/read transaction completion event
@@ -160,7 +158,7 @@ func CreateHeader(txType common.HeaderType, channelId string, creator []byte, tl
 		return "", nil, err
 	}
 
-	txId, err := utils.ComputeTxID(nonce, creator)
+	txId, err := protoutil.ComputeTxID(nonce, creator)
 	if err != nil {
 		return "", nil, err
 	}

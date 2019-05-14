@@ -12,7 +12,7 @@ import (
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 )
 
 //--------- errors ---------
@@ -36,7 +36,7 @@ func (e InvalidIdInfo) Error() string {
 //policyEvalutor interface provides the interfaces for policy evaluation
 type policyEvaluator interface {
 	PolicyRefForAPI(resName string) string
-	Evaluate(polName string, id []*common.SignedData) error
+	Evaluate(polName string, id []*protoutil.SignedData) error
 }
 
 //policyEvaluatorImpl implements policyEvaluator
@@ -58,7 +58,7 @@ func (pe *policyEvaluatorImpl) PolicyRefForAPI(resName string) string {
 	return pm.PolicyRefForAPI(resName)
 }
 
-func (pe *policyEvaluatorImpl) Evaluate(polName string, sd []*common.SignedData) error {
+func (pe *policyEvaluatorImpl) Evaluate(polName string, sd []*protoutil.SignedData) error {
 	policy, ok := pe.bundle.PolicyManager().GetPolicy(polName)
 	if !ok {
 		return PolicyNotFound(polName)
@@ -94,42 +94,43 @@ func (rp *aclmgmtPolicyProviderImpl) CheckACL(polName string, idinfo interface{}
 	aclLogger.Debugf("acl check(%s)", polName)
 
 	//we will implement other identifiers. In the end we just need a SignedData
-	var sd []*common.SignedData
-	var err error
-	switch idinfo.(type) {
+	var sd []*protoutil.SignedData
+	switch idinfo := idinfo.(type) {
 	case *pb.SignedProposal:
-		signedProp, _ := idinfo.(*pb.SignedProposal)
-		// Prepare SignedData
-		proposal, err := utils.GetProposal(signedProp.ProposalBytes)
+		signedProp := idinfo
+		proposal, err := protoutil.GetProposal(signedProp.ProposalBytes)
 		if err != nil {
 			return fmt.Errorf("Failing extracting proposal during check policy with policy [%s]: [%s]", polName, err)
 		}
 
-		header, err := utils.GetHeader(proposal.Header)
+		header, err := protoutil.GetHeader(proposal.Header)
 		if err != nil {
 			return fmt.Errorf("Failing extracting header during check policy [%s]: [%s]", polName, err)
 		}
 
-		shdr, err := utils.GetSignatureHeader(header.SignatureHeader)
+		shdr, err := protoutil.GetSignatureHeader(header.SignatureHeader)
 		if err != nil {
 			return fmt.Errorf("Invalid Proposal's SignatureHeader during check policy [%s]: [%s]", polName, err)
 		}
 
-		sd = []*common.SignedData{{
+		sd = []*protoutil.SignedData{{
 			Data:      signedProp.ProposalBytes,
 			Identity:  shdr.Creator,
 			Signature: signedProp.Signature,
 		}}
+
 	case *common.Envelope:
-		sd, err = idinfo.(*common.Envelope).AsSignedData()
+		var err error
+		sd, err = protoutil.EnvelopeAsSignedData(idinfo)
 		if err != nil {
 			return err
 		}
+
 	default:
 		return InvalidIdInfo(polName)
 	}
 
-	err = rp.pEvaluator.Evaluate(polName, sd)
+	err := rp.pEvaluator.Evaluate(polName, sd)
 	if err != nil {
 		return fmt.Errorf("failed evaluating policy on signed data during check policy [%s]: [%s]", polName, err)
 	}

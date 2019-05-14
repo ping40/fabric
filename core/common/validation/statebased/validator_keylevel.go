@@ -7,27 +7,154 @@ SPDX-License-Identifier: Apache-2.0
 package statebased
 
 import (
-	"fmt"
 	"sync"
 
 	commonerrors "github.com/hyperledger/fabric/common/errors"
-	"github.com/hyperledger/fabric/core/handlers/validation/api/policies"
+	validation "github.com/hyperledger/fabric/core/handlers/validation/api/policies"
+	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
+type epEvaluator interface {
+	CheckCCEPIfNotChecked(cc, coll string, blockNum, txNum uint64, sd []*protoutil.SignedData) commonerrors.TxValidationError
+	CheckCCEPIfNoEPChecked(cc string, blockNum, txNum uint64, sd []*protoutil.SignedData) commonerrors.TxValidationError
+	SBEPChecked()
+}
+
 /**********************************************************************************************************/
 /**********************************************************************************************************/
 
+type baseEvaluator struct {
+	epEvaluator
+	vpmgr         KeyLevelValidationParameterManager
+	policySupport validation.PolicyEvaluator
+}
+
+func (p *baseEvaluator) checkSBAndCCEP(cc, coll, key string, blockNum, txNum uint64, signatureSet []*protoutil.SignedData) commonerrors.TxValidationError {
+	// see if there is a key-level validation parameter for this key
+	vp, err := p.vpmgr.GetValidationParameterForKey(cc, coll, key, blockNum, txNum)
+	if err != nil {
+		// error handling for GetValidationParameterForKey follows this rationale:
+		switch err := errors.Cause(err).(type) {
+		// 1) if there is a conflict because validation params have been updated
+		//    by another transaction in this block, we will get ValidationParameterUpdatedError.
+		//    This should lead to invalidating the transaction by calling policyErr
+		case *ValidationParameterUpdatedError:
+			return policyErr(err)
+		// 2) if the ledger returns "determinstic" errors, that is, errors that
+		//    every peer in the channel will also return (such as errors linked to
+		//    an attempt to retrieve metadata from a non-defined collection) should be
+		//    logged and ignored. The ledger will take the most appropriate action
+		//    when performing its side of the validation.
+		case *ledger.CollConfigNotDefinedError, *ledger.InvalidCollNameError:
+			logger.Warningf(errors.WithMessage(err, "skipping key-level validation").Error())
+			err = nil
+		// 3) any other type of error should return an execution failure which will
+		//    lead to halting the processing on this channel. Note that any non-categorized
+		//    deterministic error would be caught by the default and would lead to
+		//    a processing halt. This would certainly be a bug, but - in the absence of a
+		//    single, well-defined deterministic error returned by the ledger, it is
+		//    best to err on the side of caution and rather halt processing (because a
+		//    deterministic error is treated like an I/O one) rather than risking a fork
+		//    (in case an I/O error is treated as a deterministic one).
+		default:
+			return &commonerrors.VSCCExecutionFailureError{
+				Err: err,
+			}
+		}
+	}
+
+	// if no key-level validation parameter has been specified, the regular cc endorsement policy needs to hold
+	if len(vp) == 0 {
+		return p.CheckCCEPIfNotChecked(cc, coll, blockNum, txNum, signatureSet)
+	}
+
+	// validate against key-level vp
+	err = p.policySupport.Evaluate(vp, signatureSet)
+	if err != nil {
+		return policyErr(errors.Wrapf(err, "validation of key %s (coll'%s':ns'%s') in tx %d:%d failed", key, coll, cc, blockNum, txNum))
+	}
+
+	p.SBEPChecked()
+
+	return nil
+}
+
+func (p *baseEvaluator) Evaluate(blockNum, txNum uint64, NsRwSets []*rwsetutil.NsRwSet, ns string, sd []*protoutil.SignedData) commonerrors.TxValidationError {
+	// iterate over all writes in the rwset
+	for _, nsRWSet := range NsRwSets {
+		// skip other namespaces
+		if nsRWSet.NameSpace != ns {
+			continue
+		}
+
+		// public writes
+		// we validate writes against key-level validation parameters
+		// if any are present or the chaincode-wide endorsement policy
+		for _, pubWrite := range nsRWSet.KvRwSet.Writes {
+			err := p.checkSBAndCCEP(ns, "", pubWrite.Key, blockNum, txNum, sd)
+			if err != nil {
+				return err
+			}
+		}
+		// public metadata writes
+		// we validate writes against key-level validation parameters
+		// if any are present or the chaincode-wide endorsement policy
+		for _, pubMdWrite := range nsRWSet.KvRwSet.MetadataWrites {
+			err := p.checkSBAndCCEP(ns, "", pubMdWrite.Key, blockNum, txNum, sd)
+			if err != nil {
+				return err
+			}
+		}
+		// writes in collections
+		// we validate writes against key-level validation parameters
+		// if any are present or the chaincode-wide endorsement policy
+		for _, collRWSet := range nsRWSet.CollHashedRwSets {
+			coll := collRWSet.CollectionName
+			for _, hashedWrite := range collRWSet.HashedRwSet.HashedWrites {
+				key := string(hashedWrite.KeyHash)
+				err := p.checkSBAndCCEP(ns, coll, key, blockNum, txNum, sd)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		// metadata writes in collections
+		// we validate writes against key-level validation parameters
+		// if any are present or the chaincode-wide endorsement policy
+		for _, collRWSet := range nsRWSet.CollHashedRwSets {
+			coll := collRWSet.CollectionName
+			for _, hashedMdWrite := range collRWSet.HashedRwSet.MetadataWrites {
+				key := string(hashedMdWrite.KeyHash)
+				err := p.checkSBAndCCEP(ns, coll, key, blockNum, txNum, sd)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// we make sure that we check at least the CCEP to honour FAB-9473
+	return p.CheckCCEPIfNoEPChecked(ns, blockNum, txNum, sd)
+}
+
+/**********************************************************************************************************/
+/**********************************************************************************************************/
+
+// RWSetPolicyEvaluatorFactory is a factory for policy evaluators
 type RWSetPolicyEvaluatorFactory interface {
+	// Evaluator returns a new policy evaluator
+	// given the supplied chaincode endorsement policy
 	Evaluator(ccEP []byte) RWSetPolicyEvaluator
 }
 
+// RWSetPolicyEvaluator provides means to evaluate transaction artefacts
 type RWSetPolicyEvaluator interface {
-	Evaluate(blockNum, txNum uint64, NsRwSets []*rwsetutil.NsRwSet, ns string, sd []*common.SignedData) commonerrors.TxValidationError
+	Evaluate(blockNum, txNum uint64, NsRwSets []*rwsetutil.NsRwSet, ns string, sd []*protoutil.SignedData) commonerrors.TxValidationError
 }
 
 /**********************************************************************************************************/
@@ -46,15 +173,16 @@ type KeyLevelValidator struct {// 是针对channel的单例 ？
 	pef      RWSetPolicyEvaluatorFactory
 }
 
+<<<<<<< HEAD
 func NewKeyLevelValidator(policySupport validation.PolicyEvaluator, vpmgr KeyLevelValidationParameterManager) *KeyLevelValidator {
 	logger.Errorf("ping 000 NewKeyLevelValidator  00")
+=======
+func NewKeyLevelValidator(evaluator RWSetPolicyEvaluatorFactory, vpmgr KeyLevelValidationParameterManager) *KeyLevelValidator {
+>>>>>>> upstream/master
 	return &KeyLevelValidator{
 		vpmgr:    vpmgr,
 		blockDep: blockDependency{},
-		pef: &policyCheckerFactory{
-			policySupport: policySupport,
-			vpmgr:         vpmgr,
-		},
+		pef:      evaluator,
 	}
 }
 
@@ -71,37 +199,37 @@ func (klv *KeyLevelValidator) invokeOnce(block *common.Block, txnum uint64) *syn
 }
 
 func (klv *KeyLevelValidator) extractDependenciesForTx(blockNum, txNum uint64, envelopeBytes []byte) {
-	env, err := utils.GetEnvelopeFromBlock(envelopeBytes)
+	env, err := protoutil.GetEnvelopeFromBlock(envelopeBytes)
 	if err != nil {
 		logger.Warningf("while executing GetEnvelopeFromBlock got error '%s', skipping tx at height (%d,%d)", err, blockNum, txNum)
 		return
 	}
 
-	payl, err := utils.GetPayload(env)
+	payl, err := protoutil.GetPayload(env)
 	if err != nil {
 		logger.Warningf("while executing GetPayload got error '%s', skipping tx at height (%d,%d)", err, blockNum, txNum)
 		return
 	}
 
-	tx, err := utils.GetTransaction(payl.Data)
+	tx, err := protoutil.GetTransaction(payl.Data)
 	if err != nil {
 		logger.Warningf("while executing GetTransaction got error '%s', skipping tx at height (%d,%d)", err, blockNum, txNum)
 		return
 	}
 
-	cap, err := utils.GetChaincodeActionPayload(tx.Actions[0].Payload)
+	cap, err := protoutil.GetChaincodeActionPayload(tx.Actions[0].Payload)
 	if err != nil {
 		logger.Warningf("while executing GetChaincodeActionPayload got error '%s', skipping tx at height (%d,%d)", err, blockNum, txNum)
 		return
 	}
 
-	pRespPayload, err := utils.GetProposalResponsePayload(cap.Action.ProposalResponsePayload)
+	pRespPayload, err := protoutil.GetProposalResponsePayload(cap.Action.ProposalResponsePayload)
 	if err != nil {
 		logger.Warningf("while executing GetProposalResponsePayload got error '%s', skipping tx at height (%d,%d)", err, blockNum, txNum)
 		return
 	}
 
-	respPayload, err := utils.GetChaincodeAction(pRespPayload.Extension)
+	respPayload, err := protoutil.GetChaincodeAction(pRespPayload.Extension)
 	if err != nil {
 		logger.Warningf("while executing GetChaincodeAction got error '%s', skipping tx at height (%d,%d)", err, blockNum, txNum)
 		return
@@ -125,13 +253,13 @@ func (klv *KeyLevelValidator) PreValidate(txNum uint64, block *common.Block) {
 // Validate implements the function of the StateBasedValidator interface
 func (klv *KeyLevelValidator) Validate(cc string, blockNum, txNum uint64, rwsetBytes, prp, ccEP []byte, endorsements []*peer.Endorsement) commonerrors.TxValidationError {
 	// construct signature set
-	signatureSet := []*common.SignedData{}
+	signatureSet := []*protoutil.SignedData{}
 	for _, endorsement := range endorsements {
 		data := make([]byte, len(prp)+len(endorsement.Endorser))
 		copy(data, prp)
 		copy(data[len(prp):], endorsement.Endorser)
 
-		signatureSet = append(signatureSet, &common.SignedData{
+		signatureSet = append(signatureSet, &protoutil.SignedData{
 			// set the data that is signed; concatenation of proposal response bytes and endorser ID
 			Data: data,
 			// set the identity that signs the message: it's the endorser
@@ -146,7 +274,7 @@ func (klv *KeyLevelValidator) Validate(cc string, blockNum, txNum uint64, rwsetB
 	// unpack the rwset
 	rwset := &rwsetutil.TxRwSet{}
 	if err := rwset.FromProtoBytes(rwsetBytes); err != nil {
-		return policyErr(errors.WithMessage(err, fmt.Sprintf("txRWSet.FromProtoBytes failed on tx (%d,%d)", blockNum, txNum)))
+		return policyErr(errors.WithMessagef(err, "txRWSet.FromProtoBytes failed on tx (%d,%d)", blockNum, txNum))
 	}
 
 	// return the decision of the policy evaluator

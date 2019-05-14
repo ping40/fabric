@@ -13,12 +13,12 @@ import (
 	"encoding/pem"
 	"time"
 
-	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/orderer/common/localconfig"
 	"github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -38,7 +38,13 @@ func AnyChannel(_ string) bool {
 // PullerConfigFromTopLevelConfig creates a PullerConfig from a TopLevel config,
 // and from a signer and TLS key cert pair.
 // The PullerConfig's channel is initialized to be the system channel.
-func PullerConfigFromTopLevelConfig(systemChannel string, conf *localconfig.TopLevel, tlsKey, tlsCert []byte, signer crypto.LocalSigner) PullerConfig {
+func PullerConfigFromTopLevelConfig(
+	systemChannel string,
+	conf *localconfig.TopLevel,
+	tlsKey,
+	tlsCert []byte,
+	signer identity.SignerSerializer,
+) PullerConfig {
 	return PullerConfig{
 		Channel:             systemChannel,
 		MaxTotalBufferBytes: conf.General.Cluster.ReplicationBufferSize,
@@ -88,7 +94,7 @@ type Replicator struct {
 	Logger                          *flogging.FabricLogger
 	Puller                          *BlockPuller
 	BootBlock                       *common.Block
-	AmIPartOfChannel                selfMembershipPredicate
+	AmIPartOfChannel                SelfMembershipPredicate
 	LedgerFactory                   LedgerFactory
 }
 
@@ -200,13 +206,17 @@ func (r *Replicator) PullChannel(channel string) error {
 
 func (r *Replicator) pullChannelBlocks(channel string, puller *BlockPuller, latestHeight uint64, ledger LedgerWriter) error {
 	nextBlockToPull := ledger.Height()
+	if nextBlockToPull == latestHeight {
+		r.Logger.Infof("Latest height found (%d) is equal to our height, skipping pulling channel %s", latestHeight, channel)
+		return nil
+	}
 	// Pull the next block and remember its hash.
 	nextBlock := puller.PullBlock(nextBlockToPull)
 	if nextBlock == nil {
 		return ErrRetryCountExhausted
 	}
 	r.appendBlock(nextBlock, ledger, channel)
-	actualPrevHash := nextBlock.Header.Hash()
+	actualPrevHash := protoutil.BlockHeaderHash(nextBlock.Header)
 
 	for seq := uint64(nextBlockToPull + 1); seq < latestHeight; seq++ {
 		block := puller.PullBlock(seq)
@@ -218,7 +228,7 @@ func (r *Replicator) pullChannelBlocks(channel string, puller *BlockPuller, late
 			return errors.Errorf("block header mismatch on sequence %d, expected %x, got %x",
 				block.Header.Number, actualPrevHash, reportedPrevHash)
 		}
-		actualPrevHash = block.Header.Hash()
+		actualPrevHash = protoutil.BlockHeaderHash(block.Header)
 		if channel == r.SystemChannel && block.Header.Number == r.BootBlock.Header.Number {
 			r.compareBootBlockWithSystemChannelLastConfigBlock(block)
 			r.appendBlock(block, ledger, channel)
@@ -233,21 +243,21 @@ func (r *Replicator) pullChannelBlocks(channel string, puller *BlockPuller, late
 func (r *Replicator) appendBlock(block *common.Block, ledger LedgerWriter, channel string) {
 	height := ledger.Height()
 	if height > block.Header.Number {
-		r.Logger.Infof("Skipping commit of block %d for channel %s because height is at %d", block.Header.Number, channel, height)
+		r.Logger.Infof("Skipping commit of block [%d] for channel %s because height is at %d", block.Header.Number, channel, height)
 		return
 	}
 	if err := ledger.Append(block); err != nil {
-		r.Logger.Panicf("Failed to write block %d: %v", block.Header.Number, err)
+		r.Logger.Panicf("Failed to write block [%d]: %v", block.Header.Number, err)
 	}
-	r.Logger.Infof("Committed block %d for channel %s", block.Header.Number, channel)
+	r.Logger.Infof("Committed block [%d] for channel %s", block.Header.Number, channel)
 }
 
 func (r *Replicator) compareBootBlockWithSystemChannelLastConfigBlock(block *common.Block) {
 	// Overwrite the received block's data hash
-	block.Header.DataHash = block.Data.Hash()
+	block.Header.DataHash = protoutil.BlockDataHash(block.Data)
 
-	bootBlockHash := r.BootBlock.Header.Hash()
-	retrievedBlockHash := block.Header.Hash()
+	bootBlockHash := protoutil.BlockHeaderHash(r.BootBlock.Header)
+	retrievedBlockHash := protoutil.BlockHeaderHash(block.Header)
 	if bytes.Equal(bootBlockHash, retrievedBlockHash) {
 		return
 	}
@@ -325,7 +335,7 @@ type PullerConfig struct {
 	TLSKey              []byte
 	TLSCert             []byte
 	Timeout             time.Duration
-	Signer              crypto.LocalSigner
+	Signer              identity.SignerSerializer
 	Channel             string
 	MaxTotalBufferBytes int
 }
@@ -344,22 +354,24 @@ func BlockPullerFromConfigBlock(conf PullerConfig, block *common.Block, verifier
 		return nil, errors.New("nil block")
 	}
 
-	endpointconfig, err := EndpointconfigFromConfigBlock(block)
+	endpoints, err := EndpointconfigFromConfigBlock(block)
 	if err != nil {
 		return nil, err
 	}
 
+	clientConf := comm.ClientConfig{
+		Timeout: conf.Timeout,
+		SecOpts: &comm.SecureOptions{
+			Certificate:       conf.TLSCert,
+			Key:               conf.TLSKey,
+			RequireClientCert: true,
+			UseTLS:            true,
+		},
+	}
+
 	dialer := &StandardDialer{
-		Dialer: NewTLSPinningDialer(comm.ClientConfig{
-			Timeout: conf.Timeout,
-			SecOpts: &comm.SecureOptions{
-				ServerRootCAs:     endpointconfig.TLSRootCAs,
-				Certificate:       conf.TLSCert,
-				Key:               conf.TLSKey,
-				RequireClientCert: true,
-				UseTLS:            true,
-			},
-		})}
+		Config: clientConf.Clone(),
+	}
 
 	tlsCertAsDER, _ := pem.Decode(conf.TLSCert)
 	if tlsCertAsDER == nil {
@@ -378,7 +390,7 @@ func BlockPullerFromConfigBlock(conf PullerConfig, block *common.Block, verifier
 			return VerifyBlocks(blocks, verifier)
 		},
 		MaxTotalBufferBytes: conf.MaxTotalBufferBytes,
-		Endpoints:           endpointconfig.Endpoints,
+		Endpoints:           endpoints,
 		RetryTimeout:        RetryTimeout,
 		FetchTimeout:        conf.Timeout,
 		Channel:             conf.Channel,
@@ -390,7 +402,7 @@ func BlockPullerFromConfigBlock(conf PullerConfig, block *common.Block, verifier
 type NoopBlockVerifier struct{}
 
 // VerifyBlockSignature accepts all signatures over blocks.
-func (*NoopBlockVerifier) VerifyBlockSignature(sd []*common.SignedData, config *common.ConfigEnvelope) error {
+func (*NoopBlockVerifier) VerifyBlockSignature(sd []*protoutil.SignedData, config *common.ConfigEnvelope) error {
 	return nil
 }
 
@@ -419,7 +431,7 @@ type ChainInspector struct {
 var ErrSkipped = errors.New("skipped")
 
 // ErrForbidden denotes that an ordering node refuses sending blocks due to access control.
-var ErrForbidden = errors.New("forbidden")
+var ErrForbidden = errors.New("forbidden pulling the channel")
 
 // ErrServiceUnavailable denotes that an ordering node is not servicing at the moment.
 var ErrServiceUnavailable = errors.New("service unavailable")
@@ -429,33 +441,42 @@ var ErrNotInChannel = errors.New("not in the channel")
 
 var ErrRetryCountExhausted = errors.New("retry attempts exhausted")
 
-// selfMembershipPredicate determines whether the caller is found in the given config block
-type selfMembershipPredicate func(configBlock *common.Block) error
+// SelfMembershipPredicate determines whether the caller is found in the given config block
+type SelfMembershipPredicate func(configBlock *common.Block) error
 
 // Participant returns whether the caller participates in the chain.
 // It receives a ChainPuller that should already be calibrated for the chain,
-// and a selfMembershipPredicate that is used to detect whether the caller should service the chain.
+// and a SelfMembershipPredicate that is used to detect whether the caller should service the chain.
 // It returns nil if the caller participates in the chain.
 // It may return:
 // ErrNotInChannel in case the caller doesn't participate in the chain.
 // ErrForbidden in case the caller is forbidden from pulling the block.
 // ErrServiceUnavailable in case all orderers reachable cannot complete the request.
 // ErrRetryCountExhausted in case no orderer is reachable.
-func Participant(puller ChainPuller, analyzeLastConfBlock selfMembershipPredicate) error {
-	endpoint, latestHeight, err := latestHeightAndEndpoint(puller)
+func Participant(puller ChainPuller, analyzeLastConfBlock SelfMembershipPredicate) error {
+	lastConfigBlock, err := PullLastConfigBlock(puller)
 	if err != nil {
 		return err
 	}
+	return analyzeLastConfBlock(lastConfigBlock)
+}
+
+// PullLastConfigBlock pulls the last configuration block, or returns an error on failure.
+func PullLastConfigBlock(puller ChainPuller) (*common.Block, error) {
+	endpoint, latestHeight, err := latestHeightAndEndpoint(puller)
+	if err != nil {
+		return nil, err
+	}
 	if endpoint == "" {
-		return ErrRetryCountExhausted
+		return nil, ErrRetryCountExhausted
 	}
 	lastBlock := puller.PullBlock(latestHeight - 1)
 	if lastBlock == nil {
-		return ErrRetryCountExhausted
+		return nil, ErrRetryCountExhausted
 	}
 	lastConfNumber, err := lastConfigFromBlock(lastBlock)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The last config block is smaller than the latest height,
 	// and a block iterator on the server side is a sequenced one.
@@ -463,9 +484,9 @@ func Participant(puller ChainPuller, analyzeLastConfBlock selfMembershipPredicat
 	puller.Close()
 	lastConfigBlock := puller.PullBlock(lastConfNumber)
 	if lastConfigBlock == nil {
-		return ErrRetryCountExhausted
+		return nil, ErrRetryCountExhausted
 	}
-	return analyzeLastConfBlock(lastConfigBlock)
+	return lastConfigBlock, nil
 }
 
 func latestHeightAndEndpoint(puller ChainPuller) (string, uint64, error) {
@@ -488,7 +509,7 @@ func lastConfigFromBlock(block *common.Block) (uint64, error) {
 	if block.Metadata == nil || len(block.Metadata.Metadata) <= int(common.BlockMetadataIndex_LAST_CONFIG) {
 		return 0, errors.New("no metadata in block")
 	}
-	return utils.GetLastConfigIndexFromBlock(block)
+	return protoutil.GetLastConfigIndexFromBlock(block)
 }
 
 // Close closes the ChainInspector
@@ -522,21 +543,21 @@ func (ci *ChainInspector) Channels() []ChannelGenesisBlock {
 	lastConfigBlockNum := ci.LastConfigBlock.Header.Number
 	var block *common.Block
 	var prevHash []byte
-	for seq := uint64(1); seq < lastConfigBlockNum; seq++ {
+	for seq := uint64(0); seq < lastConfigBlockNum; seq++ {
 		block = ci.Puller.PullBlock(seq)
 		if block == nil {
-			ci.Logger.Panicf("Failed pulling block %d from the system channel", seq)
+			ci.Logger.Panicf("Failed pulling block [%d] from the system channel", seq)
 		}
 		ci.validateHashPointer(block, prevHash)
 		channel, err := IsNewChannelBlock(block)
 		if err != nil {
 			// If we failed to classify a block, something is wrong in the system chain
 			// we're trying to pull, so abort.
-			ci.Logger.Panic("Failed classifying block", seq, ":", err)
+			ci.Logger.Panicf("Failed classifying block [%d]: %s", seq, err)
 			continue
 		}
 		// Set the previous hash for the next iteration
-		prevHash = block.Header.Hash()
+		prevHash = protoutil.BlockHeaderHash(block.Header)
 		if channel == "" {
 			ci.Logger.Info("Block", seq, "doesn't contain a new channel")
 			continue
@@ -567,7 +588,7 @@ func (ci *ChainInspector) validateHashPointer(block *common.Block, prevHash []by
 	if bytes.Equal(block.Header.PreviousHash, prevHash) {
 		return
 	}
-	ci.Logger.Panicf("Claimed previous hash of block %d is %x but actual previous hash is %x",
+	ci.Logger.Panicf("Claimed previous hash of block [%d] is %x but actual previous hash is %x",
 		block.Header.Number, block.Header.PreviousHash, prevHash)
 }
 
@@ -584,24 +605,26 @@ func ChannelCreationBlockToGenesisBlock(block *common.Block) (*common.Block, err
 	if block == nil {
 		return nil, errors.New("nil block")
 	}
-	env, err := utils.ExtractEnvelope(block, 0)
+	env, err := protoutil.ExtractEnvelope(block, 0)
 	if err != nil {
 		return nil, err
 	}
-	payload, err := utils.ExtractPayload(env)
+	payload, err := protoutil.ExtractPayload(env)
 	if err != nil {
 		return nil, err
 	}
 	block.Data.Data = [][]byte{payload.Data}
-	block.Header.DataHash = block.Data.Hash()
+	block.Header.DataHash = protoutil.BlockDataHash(block.Data)
 	block.Header.Number = 0
 	block.Header.PreviousHash = nil
 	metadata := &common.BlockMetadata{
 		Metadata: make([][]byte, 4),
 	}
 	block.Metadata = metadata
-	metadata.Metadata[common.BlockMetadataIndex_LAST_CONFIG] = utils.MarshalOrPanic(&common.LastConfig{
-		Index: 0,
+	metadata.Metadata[common.BlockMetadataIndex_LAST_CONFIG] = protoutil.MarshalOrPanic(&common.Metadata{
+		Value: protoutil.MarshalOrPanic(&common.LastConfig{Index: 0}),
+		// This is a genesis block, peer never verify this signature because we can't bootstrap
+		// trust from an earlier block, hence there are no signatures here.
 	})
 	return block, nil
 }
@@ -612,18 +635,18 @@ func IsNewChannelBlock(block *common.Block) (string, error) {
 	if block == nil {
 		return "", errors.New("nil block")
 	}
-	env, err := utils.ExtractEnvelope(block, 0)
+	env, err := protoutil.ExtractEnvelope(block, 0)
 	if err != nil {
 		return "", err
 	}
-	payload, err := utils.ExtractPayload(env)
+	payload, err := protoutil.ExtractPayload(env)
 	if err != nil {
 		return "", err
 	}
 	if payload.Header == nil {
 		return "", errors.New("nil header in payload")
 	}
-	chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 	if err != nil {
 		return "", err
 	}
@@ -632,18 +655,18 @@ func IsNewChannelBlock(block *common.Block) (string, error) {
 		return "", nil
 	}
 	systemChannelName := chdr.ChannelId
-	innerEnvelope, err := utils.UnmarshalEnvelope(payload.Data)
+	innerEnvelope, err := protoutil.UnmarshalEnvelope(payload.Data)
 	if err != nil {
 		return "", err
 	}
-	innerPayload, err := utils.UnmarshalPayload(innerEnvelope.Payload)
+	innerPayload, err := protoutil.UnmarshalPayload(innerEnvelope.Payload)
 	if err != nil {
 		return "", err
 	}
 	if innerPayload.Header == nil {
 		return "", errors.New("inner payload's header is nil")
 	}
-	chdr, err = utils.UnmarshalChannelHeader(innerPayload.Header.ChannelHeader)
+	chdr, err = protoutil.UnmarshalChannelHeader(innerPayload.Header.ChannelHeader)
 	if err != nil {
 		return "", err
 	}

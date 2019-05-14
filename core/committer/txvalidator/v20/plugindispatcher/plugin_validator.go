@@ -10,31 +10,52 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/hyperledger/fabric/common/cauthdsl"
 	ledger2 "github.com/hyperledger/fabric/common/ledger"
-	vp "github.com/hyperledger/fabric/core/committer/txvalidator/plugin"
-	"github.com/hyperledger/fabric/core/handlers/validation/api"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/capabilities"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/identities"
-	. "github.com/hyperledger/fabric/core/handlers/validation/api/state"
+	"github.com/hyperledger/fabric/common/policies"
+	txvalidatorplugin "github.com/hyperledger/fabric/core/committer/txvalidator/plugin"
+	validation "github.com/hyperledger/fabric/core/handlers/validation/api"
+	vc "github.com/hyperledger/fabric/core/handlers/validation/api/capabilities"
+	vi "github.com/hyperledger/fabric/core/handlers/validation/api/identities"
+	vp "github.com/hyperledger/fabric/core/handlers/validation/api/policies"
+	vs "github.com/hyperledger/fabric/core/handlers/validation/api/state"
 	"github.com/hyperledger/fabric/core/ledger"
+	"github.com/hyperledger/fabric/core/policy"
 	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
-//go:generate mockery -dir ../../plugin/ -name Mapper -case underscore -output mocks/
-//go:generate mockery -dir ../../../../handlers/validation/api/ -name PluginFactory -case underscore -output mocks/
-//go:generate mockery -dir ../../../../handlers/validation/api/ -name Plugin -case underscore -output mocks/
+//go:generate mockery -dir . -name Mapper -case underscore -output mocks/
+
+// Mapper is the local interface that used to generate mocks for foreign interface.
+type Mapper interface {
+	txvalidatorplugin.Mapper
+}
+
+//go:generate mockery -dir . -name PluginFactory -case underscore -output mocks/
+
+// PluginFactory is the local interface that used to generate mocks for foreign interface.
+type PluginFactory interface {
+	validation.PluginFactory
+}
+
+//go:generate mockery -dir . -name Plugin -case underscore -output mocks/
+
+// Plugin is the local interface that used to generate mocks for foreign interface.
+type Plugin interface {
+	validation.Plugin
+}
+
 //go:generate mockery -dir . -name QueryExecutorCreator -case underscore -output mocks/
 
-// QueryExecutorCreator creates new query executors
+// QueryExecutorCreator creates new query executors.
 type QueryExecutorCreator interface {
 	NewQueryExecutor() (ledger.QueryExecutor, error)
 }
 
 // Context defines information about a transaction
-// that is being validated
+// that is being validated.
 type Context struct {
 	Seq        int
 	Envelope   []byte
@@ -46,32 +67,54 @@ type Context struct {
 	Block      *common.Block
 }
 
-// String returns a string representation of this Context
+// String returns a string representation of this Context.
 func (c Context) String() string {
 	return fmt.Sprintf("Tx %s, seq %d out of %d in block %d for channel %s with validation plugin %s", c.TxID, c.Seq, len(c.Block.Data.Data), c.Block.Header.Number, c.Channel, c.PluginName)
 }
 
-// PluginValidator values transactions with validation plugins
+// PluginValidator values transactions with validation plugins.
 type PluginValidator struct {
 	sync.Mutex
-	pluginChannelMapping map[vp.Name]*pluginsByChannel
-	vp.Mapper
+	pluginChannelMapping map[txvalidatorplugin.Name]*pluginsByChannel
+	txvalidatorplugin.Mapper
 	QueryExecutorCreator
 	msp.IdentityDeserializer
-	capabilities Capabilities
+	capabilities vc.Capabilities
+	policies.ChannelPolicyManagerGetter
+	CollectionResources
 }
 
-//go:generate mockery -dir ../../../../handlers/validation/api/capabilities/ -name Capabilities -case underscore -output mocks/
-//go:generate mockery -dir ../../../../../msp/ -name IdentityDeserializer -case underscore -output mocks/
+//go:generate mockery -dir . -name Capabilities -case underscore -output mocks/
 
-// NewPluginValidator creates a new PluginValidator
-func NewPluginValidator(pm vp.Mapper, qec QueryExecutorCreator, deserializer msp.IdentityDeserializer, capabilities Capabilities) *PluginValidator {
+// Capabilities is the local interface that used to generate mocks for foreign interface.
+type Capabilities interface {
+	vc.Capabilities
+}
+
+//go:generate mockery -dir . -name IdentityDeserializer -case underscore -output mocks/
+
+// IdentityDeserializer is the local interface that used to generate mocks for foreign interface.
+type IdentityDeserializer interface {
+	msp.IdentityDeserializer
+}
+
+//go:generate mockery -dir . -name ChannelPolicyManagerGetter -case underscore -output mocks/
+
+// ChannelPolicyManagerGetter is the local interface that used to generate mocks for foreign interface.
+type ChannelPolicyManagerGetter interface {
+	policies.ChannelPolicyManagerGetter
+}
+
+// NewPluginValidator creates a new PluginValidator.
+func NewPluginValidator(pm txvalidatorplugin.Mapper, qec QueryExecutorCreator, deserializer msp.IdentityDeserializer, capabilities vc.Capabilities, cpmg policies.ChannelPolicyManagerGetter, cor CollectionResources) *PluginValidator {
 	return &PluginValidator{
-		capabilities:         capabilities,
-		pluginChannelMapping: make(map[vp.Name]*pluginsByChannel),
-		Mapper:               pm,
-		QueryExecutorCreator: qec,
-		IdentityDeserializer: deserializer,
+		capabilities:               capabilities,
+		pluginChannelMapping:       make(map[txvalidatorplugin.Name]*pluginsByChannel),
+		Mapper:                     pm,
+		QueryExecutorCreator:       qec,
+		IdentityDeserializer:       deserializer,
+		ChannelPolicyManagerGetter: cpmg,
+		CollectionResources:        cor,
 	}
 }
 
@@ -82,7 +125,7 @@ func (pv *PluginValidator) ValidateWithPlugin(ctx *Context) error {
 			Reason: fmt.Sprintf("plugin with name %s couldn't be used: %v", ctx.PluginName, err),
 		}
 	}
-	err = plugin.Validate(ctx.Block, ctx.Namespace, ctx.Seq, 0, vp.SerializedPolicy(ctx.Policy))
+	err = plugin.Validate(ctx.Block, ctx.Namespace, ctx.Seq, 0, txvalidatorplugin.SerializedPolicy(ctx.Policy))
 	validityStatus := "valid"
 	if err != nil {
 		validityStatus = fmt.Sprintf("invalid: %v", err)
@@ -92,27 +135,27 @@ func (pv *PluginValidator) ValidateWithPlugin(ctx *Context) error {
 }
 
 func (pv *PluginValidator) getOrCreatePlugin(ctx *Context) (validation.Plugin, error) {
-	pluginFactory := pv.FactoryByName(vp.Name(ctx.PluginName))
+	pluginFactory := pv.FactoryByName(txvalidatorplugin.Name(ctx.PluginName))
 	if pluginFactory == nil {
 		return nil, errors.Errorf("plugin with name %s wasn't found", ctx.PluginName)
 	}
 
-	pluginsByChannel := pv.getOrCreatePluginChannelMapping(vp.Name(ctx.PluginName), pluginFactory)
+	pluginsByChannel := pv.getOrCreatePluginChannelMapping(txvalidatorplugin.Name(ctx.PluginName), pluginFactory)
 	return pluginsByChannel.createPluginIfAbsent(ctx.Channel)
 
 }
 
-func (pv *PluginValidator) getOrCreatePluginChannelMapping(plugin vp.Name, pf validation.PluginFactory) *pluginsByChannel {
+func (pv *PluginValidator) getOrCreatePluginChannelMapping(plugin txvalidatorplugin.Name, pf validation.PluginFactory) *pluginsByChannel {
 	pv.Lock()
 	defer pv.Unlock()
-	endorserChannelMapping, exists := pv.pluginChannelMapping[vp.Name(plugin)]
+	endorserChannelMapping, exists := pv.pluginChannelMapping[txvalidatorplugin.Name(plugin)]
 	if !exists {
 		endorserChannelMapping = &pluginsByChannel{
 			pluginFactory:    pf,
 			channels2Plugins: make(map[string]validation.Plugin),
 			pv:               pv,
 		}
-		pv.pluginChannelMapping[vp.Name(plugin)] = endorserChannelMapping
+		pv.pluginChannelMapping[txvalidatorplugin.Name(plugin)] = endorserChannelMapping
 	}
 	return endorserChannelMapping
 }
@@ -149,30 +192,31 @@ func (pbc *pluginsByChannel) createPluginIfAbsent(channel string) (validation.Pl
 }
 
 func (pbc *pluginsByChannel) initPlugin(plugin validation.Plugin, channel string) (validation.Plugin, error) {
-	pe := &PolicyEvaluator{IdentityDeserializer: pbc.pv.IdentityDeserializer}
+	pp, err := policy.New(pbc.pv.IdentityDeserializer, channel, pbc.pv.ChannelPolicyManagerGetter)
+	if err != nil {
+		return nil, errors.WithMessage(err, "could not obtain a policy evaluator")
+	}
+
+	pe := &PolicyEvaluatorWrapper{IdentityDeserializer: pbc.pv.IdentityDeserializer, PolicyEvaluator: pp}
 	sf := &StateFetcherImpl{QueryExecutorCreator: pbc.pv}
-	if err := plugin.Init(pe, sf, pbc.pv.capabilities); err != nil {
+	if err := plugin.Init(pe, sf, pbc.pv.capabilities, pbc.pv.CollectionResources); err != nil {
 		return nil, errors.Wrap(err, "failed initializing plugin")
 	}
 	return plugin, nil
 }
 
-type PolicyEvaluator struct {
+type PolicyEvaluatorWrapper struct {
 	msp.IdentityDeserializer
+	vp.PolicyEvaluator
 }
 
 // Evaluate takes a set of SignedData and evaluates whether this set of signatures satisfies the policy
-func (id *PolicyEvaluator) Evaluate(policyBytes []byte, signatureSet []*common.SignedData) error {
-	pp := cauthdsl.NewPolicyProvider(id.IdentityDeserializer)
-	policy, _, err := pp.NewPolicy(policyBytes)
-	if err != nil {
-		return err
-	}
-	return policy.Evaluate(signatureSet)
+func (id *PolicyEvaluatorWrapper) Evaluate(policyBytes []byte, signatureSet []*protoutil.SignedData) error {
+	return id.PolicyEvaluator.Evaluate(policyBytes, signatureSet)
 }
 
 // DeserializeIdentity unmarshals the given identity to msp.Identity
-func (id *PolicyEvaluator) DeserializeIdentity(serializedIdentity []byte) (Identity, error) {
+func (id *PolicyEvaluatorWrapper) DeserializeIdentity(serializedIdentity []byte) (vi.Identity, error) {
 	mspIdentity, err := id.IdentityDeserializer.DeserializeIdentity(serializedIdentity)
 	if err != nil {
 		return nil, err
@@ -184,9 +228,9 @@ type identity struct {
 	msp.Identity
 }
 
-func (i *identity) GetIdentityIdentifier() *IdentityIdentifier {
+func (i *identity) GetIdentityIdentifier() *vi.IdentityIdentifier {
 	identifier := i.Identity.GetIdentifier()
-	return &IdentityIdentifier{
+	return &vi.IdentityIdentifier{
 		Id:    identifier.Id,
 		Mspid: identifier.Mspid,
 	}
@@ -196,7 +240,7 @@ type StateFetcherImpl struct {
 	QueryExecutorCreator
 }
 
-func (sf *StateFetcherImpl) FetchState() (State, error) {
+func (sf *StateFetcherImpl) FetchState() (vs.State, error) {
 	qe, err := sf.NewQueryExecutor()
 	if err != nil {
 		return nil, err
@@ -208,7 +252,7 @@ type StateImpl struct {
 	ledger.QueryExecutor
 }
 
-func (s *StateImpl) GetStateRangeScanIterator(namespace string, startKey string, endKey string) (ResultsIterator, error) {
+func (s *StateImpl) GetStateRangeScanIterator(namespace string, startKey string, endKey string) (vs.ResultsIterator, error) {
 	it, err := s.QueryExecutor.GetStateRangeScanIterator(namespace, startKey, endKey)
 	if err != nil {
 		return nil, err
@@ -220,6 +264,6 @@ type ResultsIteratorImpl struct {
 	ledger2.ResultsIterator
 }
 
-func (it *ResultsIteratorImpl) Next() (QueryResult, error) {
+func (it *ResultsIteratorImpl) Next() (vs.QueryResult, error) {
 	return it.ResultsIterator.Next()
 }

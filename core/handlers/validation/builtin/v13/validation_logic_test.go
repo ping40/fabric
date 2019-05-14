@@ -33,7 +33,7 @@ import (
 	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/common/privdata"
 	cutils "github.com/hyperledger/fabric/core/container/util"
-	"github.com/hyperledger/fabric/core/handlers/validation/api/capabilities"
+	validation "github.com/hyperledger/fabric/core/handlers/validation/api/capabilities"
 	"github.com/hyperledger/fabric/core/handlers/validation/builtin/v13/mocks"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/rwsetutil"
 	corepeer "github.com/hyperledger/fabric/core/peer"
@@ -41,11 +41,11 @@ import (
 	"github.com/hyperledger/fabric/core/scc/lscc"
 	"github.com/hyperledger/fabric/msp"
 	mspmgmt "github.com/hyperledger/fabric/msp/mgmt"
-	"github.com/hyperledger/fabric/msp/mgmt/testtools"
+	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/ledger/rwset/kvrwset"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -55,21 +55,21 @@ func createTx(endorsedByDuplicatedIdentity bool) (*common.Envelope, error) {
 	ccid := &peer.ChaincodeID{Name: "foo", Version: "v1"}
 	cis := &peer.ChaincodeInvocationSpec{ChaincodeSpec: &peer.ChaincodeSpec{ChaincodeId: ccid}}
 
-	prop, _, err := utils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
+	prop, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
 	if err != nil {
 		return nil, err
 	}
 
-	presp, err := utils.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, []byte("res"), nil, ccid, nil, id)
+	presp, err := protoutil.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, []byte("res"), nil, ccid, nil, id)
 	if err != nil {
 		return nil, err
 	}
 
 	var env *common.Envelope
 	if endorsedByDuplicatedIdentity {
-		env, err = utils.CreateSignedTx(prop, id, presp, presp)
+		env, err = protoutil.CreateSignedTx(prop, id, presp, presp)
 	} else {
-		env, err = utils.CreateSignedTx(prop, id, presp)
+		env, err = protoutil.CreateSignedTx(prop, id, presp)
 	}
 	if err != nil {
 		return nil, err
@@ -83,7 +83,7 @@ func processSignedCDS(cds *peer.ChaincodeDeploymentSpec, policy *common.Signatur
 		return nil, fmt.Errorf("could not create package %s", err)
 	}
 
-	b := utils.MarshalOrPanic(env)
+	b := protoutil.MarshalOrPanic(env)
 
 	ccpack := &ccprovider.SignedCDSPackage{}
 	cd, err := ccpack.InitFromBuffer(b)
@@ -95,9 +95,9 @@ func processSignedCDS(cds *peer.ChaincodeDeploymentSpec, policy *common.Signatur
 		return nil, fmt.Errorf("error putting package on the FS %s", err)
 	}
 
-	cd.InstantiationPolicy = utils.MarshalOrPanic(policy)
+	cd.InstantiationPolicy = protoutil.MarshalOrPanic(policy)
 
-	return utils.MarshalOrPanic(cd), nil
+	return protoutil.MarshalOrPanic(cd), nil
 }
 
 func constructDeploymentSpec(name string, path string, version string, initArgs [][]byte, createFS bool) (*peer.ChaincodeDeploymentSpec, error) {
@@ -134,7 +134,7 @@ func createCCDataRWsetWithCollection(nameK, nameV, version string, policy []byte
 		InstantiationPolicy: policy,
 	}
 
-	cdbytes := utils.MarshalOrPanic(cd)
+	cdbytes := protoutil.MarshalOrPanic(cd)
 
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", nameK, cdbytes)
@@ -153,7 +153,7 @@ func createCCDataRWset(nameK, nameV, version string, policy []byte) ([]byte, err
 		InstantiationPolicy: policy,
 	}
 
-	cdbytes := utils.MarshalOrPanic(cd)
+	cdbytes := protoutil.MarshalOrPanic(cd)
 
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", nameK, cdbytes)
@@ -214,19 +214,19 @@ func createLSCCTxPutCdsWithCollection(ccname, ccver, f string, res, cdsbytes []b
 		}
 	}
 
-	prop, _, err := utils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
+	prop, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
 	if err != nil {
 		return nil, err
 	}
 
 	ccid := &peer.ChaincodeID{Name: ccname, Version: ccver}
 
-	presp, err := utils.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, res, nil, ccid, nil, id)
+	presp, err := protoutil.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, res, nil, ccid, nil, id)
 	if err != nil {
 		return nil, err
 	}
 
-	return utils.CreateSignedTx(prop, id, presp)
+	return protoutil.CreateSignedTx(prop, id, presp)
 }
 
 func createLSCCTxPutCds(ccname, ccver, f string, res, cdsbytes []byte, putcds bool) (*common.Envelope, error) {
@@ -271,25 +271,25 @@ func createLSCCTxPutCds(ccname, ccver, f string, res, cdsbytes []byte, putcds bo
 		}
 	}
 
-	prop, _, err := utils.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
+	prop, _, err := protoutil.CreateProposalFromCIS(common.HeaderType_ENDORSER_TRANSACTION, util.GetTestChainID(), cis, sid)
 	if err != nil {
 		return nil, err
 	}
 
 	ccid := &peer.ChaincodeID{Name: ccname, Version: ccver}
 
-	presp, err := utils.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, res, nil, ccid, nil, id)
+	presp, err := protoutil.CreateProposalResponse(prop.Header, prop.Payload, &peer.Response{Status: 200}, res, nil, ccid, nil, id)
 	if err != nil {
 		return nil, err
 	}
 
-	return utils.CreateSignedTx(prop, id, presp)
+	return protoutil.CreateSignedTx(prop, id, presp)
 }
 
 func getSignedByMSPMemberPolicy(mspID string) ([]byte, error) {
 	p := cauthdsl.SignedByMspMember(mspID)
 
-	b, err := utils.Marshal(p)
+	b, err := protoutil.Marshal(p)
 	if err != nil {
 		return nil, fmt.Errorf("Could not marshal policy, err %s", err)
 	}
@@ -300,7 +300,7 @@ func getSignedByMSPMemberPolicy(mspID string) ([]byte, error) {
 func getSignedByMSPAdminPolicy(mspID string) ([]byte, error) {
 	p := cauthdsl.SignedByMspAdmin(mspID)
 
-	b, err := utils.Marshal(p)
+	b, err := protoutil.Marshal(p)
 	if err != nil {
 		return nil, fmt.Errorf("Could not marshal policy, err %s", err)
 	}
@@ -352,7 +352,7 @@ func TestStateBasedValidationFailure(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -392,12 +392,12 @@ func TestInvoke(t *testing.T) {
 	assert.Error(t, err)
 
 	// (still) broken Envelope
-	b = &common.Block{Data: &common.BlockData{Data: [][]byte{utils.MarshalOrPanic(&common.Envelope{Payload: []byte("barf")})}}, Header: &common.BlockHeader{}}
+	b = &common.Block{Data: &common.BlockData{Data: [][]byte{protoutil.MarshalOrPanic(&common.Envelope{Payload: []byte("barf")})}}, Header: &common.BlockHeader{}}
 	err = v.Validate(b, "foo", 0, 0, []byte("a"))
 	assert.Error(t, err)
 
 	// (still) broken Envelope
-	e := utils.MarshalOrPanic(&common.Envelope{Payload: utils.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: []byte("barf")}})})
+	e := protoutil.MarshalOrPanic(&common.Envelope{Payload: protoutil.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: []byte("barf")}})})
 	b = &common.Block{Data: &common.BlockData{Data: [][]byte{e}}, Header: &common.BlockHeader{}}
 	err = v.Validate(b, "foo", 0, 0, []byte("a"))
 	assert.Error(t, err)
@@ -407,7 +407,7 @@ func TestInvoke(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -418,13 +418,13 @@ func TestInvoke(t *testing.T) {
 	}
 
 	// broken type
-	e = utils.MarshalOrPanic(&common.Envelope{Payload: utils.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_ORDERER_TRANSACTION)})}})})
+	e = protoutil.MarshalOrPanic(&common.Envelope{Payload: protoutil.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: protoutil.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_ORDERER_TRANSACTION)})}})})
 	b = &common.Block{Data: &common.BlockData{Data: [][]byte{e}}, Header: &common.BlockHeader{}}
 	err = v.Validate(b, "foo", 0, 0, policy)
 	assert.Error(t, err)
 
 	// broken tx payload
-	e = utils.MarshalOrPanic(&common.Envelope{Payload: utils.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: utils.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_ORDERER_TRANSACTION)})}})})
+	e = protoutil.MarshalOrPanic(&common.Envelope{Payload: protoutil.MarshalOrPanic(&common.Payload{Header: &common.Header{ChannelHeader: protoutil.MarshalOrPanic(&common.ChannelHeader{Type: int32(common.HeaderType_ORDERER_TRANSACTION)})}})})
 	b = &common.Block{Data: &common.BlockData{Data: [][]byte{e}}, Header: &common.BlockHeader{}}
 	err = v.Validate(b, "foo", 0, 0, policy)
 	assert.Error(t, err)
@@ -465,7 +465,7 @@ func TestRWSetTooBig(t *testing.T) {
 		InstantiationPolicy: nil,
 	}
 
-	cdbytes := utils.MarshalOrPanic(cd)
+	cdbytes := protoutil.MarshalOrPanic(cd)
 
 	rwsetBuilder := rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", ccname, cdbytes)
@@ -480,7 +480,7 @@ func TestRWSetTooBig(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -522,7 +522,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -552,7 +552,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -579,7 +579,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -606,7 +606,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -633,7 +633,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -657,7 +657,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -684,7 +684,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -710,7 +710,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -734,7 +734,7 @@ func TestValidateDeployFail(t *testing.T) {
 		InstantiationPolicy: nil,
 	}
 
-	cdbytes := utils.MarshalOrPanic(cd)
+	cdbytes := protoutil.MarshalOrPanic(cd)
 	rwsetBuilder = rwsetutil.NewRWSetBuilder()
 	rwsetBuilder.AddToWriteSet("lscc", ccname, cdbytes)
 	rwsetBuilder.AddToWriteSet("bogusbogus", "key", []byte("val"))
@@ -747,7 +747,7 @@ func TestValidateDeployFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -792,7 +792,7 @@ func TestAlreadyDeployed(t *testing.T) {
 		t.FailNow()
 	}
 
-	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
+	sProp2, _ := protoutil.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
 	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
@@ -807,7 +807,7 @@ func TestAlreadyDeployed(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -841,7 +841,7 @@ func TestValidateDeployNoLedger(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -885,7 +885,7 @@ func TestValidateDeployOK(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -897,7 +897,7 @@ func TestValidateDeployOK(t *testing.T) {
 	}
 
 	b := &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(b, "foo", 0, 0, policy)
+	err = v.Validate(b, "lscc", 0, 0, policy)
 	assert.NoError(t, err)
 }
 
@@ -959,7 +959,7 @@ func TestValidateDeployWithCollection(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -971,7 +971,7 @@ func TestValidateDeployWithCollection(t *testing.T) {
 	}
 
 	b := &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(b, "foo", 0, 0, policy)
+	err = v.Validate(b, "lscc", 0, 0, policy)
 	assert.NoError(t, err)
 
 	// Test 2: Deploy the chaincode with duplicate collection configs --> no error as the
@@ -989,13 +989,13 @@ func TestValidateDeployWithCollection(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
 
 	b = &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(b, "foo", 0, 0, policy)
+	err = v.Validate(b, "lscc", 0, 0, policy)
 	assert.NoError(t, err)
 
 	// Test 3: Once the V1_2Validation is enabled, validation should fail due to duplicate collection configs
@@ -1022,7 +1022,7 @@ func TestValidateDeployWithCollection(t *testing.T) {
 	}
 
 	b = &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(b, "foo", 0, 0, policy)
+	err = v.Validate(b, "lscc", 0, 0, policy)
 }
 
 func TestValidateDeployWithPolicies(t *testing.T) {
@@ -1055,7 +1055,7 @@ func TestValidateDeployWithPolicies(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1067,7 +1067,7 @@ func TestValidateDeployWithPolicies(t *testing.T) {
 	}
 
 	b := &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(b, "foo", 0, 0, policy)
+	err = v.Validate(b, "lscc", 0, 0, policy)
 	assert.NoError(t, err)
 
 	/********************************************/
@@ -1082,7 +1082,7 @@ func TestValidateDeployWithPolicies(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err = utils.GetBytesEnvelope(tx)
+	envBytes, err = protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1124,7 +1124,7 @@ func TestInvalidUpgrade(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1170,7 +1170,7 @@ func TestValidateUpgradeOK(t *testing.T) {
 		t.FailNow()
 	}
 
-	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
+	sProp2, _ := protoutil.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
 	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
@@ -1187,7 +1187,7 @@ func TestValidateUpgradeOK(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1199,7 +1199,7 @@ func TestValidateUpgradeOK(t *testing.T) {
 	}
 
 	bl := &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(bl, "foo", 0, 0, policy)
+	err = v.Validate(bl, "lscc", 0, 0, policy)
 	assert.NoError(t, err)
 }
 
@@ -1233,7 +1233,7 @@ func TestInvalidateUpgradeBadVersion(t *testing.T) {
 		t.FailNow()
 	}
 
-	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
+	sProp2, _ := protoutil.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
 	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
@@ -1248,7 +1248,7 @@ func TestInvalidateUpgradeBadVersion(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1307,7 +1307,7 @@ func validateUpgradeWithCollection(t *testing.T, ccver string, V1_2Validation bo
 		t.FailNow()
 	}
 
-	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
+	sProp2, _ := protoutil.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
 	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
@@ -1347,7 +1347,7 @@ func validateUpgradeWithCollection(t *testing.T, ccver string, V1_2Validation bo
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1389,7 +1389,7 @@ func validateUpgradeWithCollection(t *testing.T, ccver string, V1_2Validation bo
 			t.Fatalf("createTx returned err %s", err)
 		}
 
-		envBytes, err = utils.GetBytesEnvelope(tx)
+		envBytes, err = protoutil.GetBytesEnvelope(tx)
 		if err != nil {
 			t.Fatalf("GetBytesEnvelope returned err %s", err)
 		}
@@ -1415,7 +1415,7 @@ func validateUpgradeWithCollection(t *testing.T, ccver string, V1_2Validation bo
 			t.Fatalf("createTx returned err %s", err)
 		}
 
-		envBytes, err = utils.GetBytesEnvelope(tx)
+		envBytes, err = protoutil.GetBytesEnvelope(tx)
 		if err != nil {
 			t.Fatalf("GetBytesEnvelope returned err %s", err)
 		}
@@ -1441,7 +1441,7 @@ func validateUpgradeWithCollection(t *testing.T, ccver string, V1_2Validation bo
 			t.Fatalf("createTx returned err %s", err)
 		}
 
-		envBytes, err = utils.GetBytesEnvelope(tx)
+		envBytes, err = protoutil.GetBytesEnvelope(tx)
 		if err != nil {
 			t.Fatalf("GetBytesEnvelope returned err %s", err)
 		}
@@ -1491,7 +1491,7 @@ func TestValidateUpgradeWithPoliciesOK(t *testing.T) {
 		t.FailNow()
 	}
 
-	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
+	sProp2, _ := protoutil.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
 	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
@@ -1508,7 +1508,7 @@ func TestValidateUpgradeWithPoliciesOK(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1521,7 +1521,7 @@ func TestValidateUpgradeWithPoliciesOK(t *testing.T) {
 
 	args = [][]byte{[]byte("dv"), envBytes, policy}
 	bl := &common.Block{Data: &common.BlockData{Data: [][]byte{envBytes}}, Header: &common.BlockHeader{}}
-	err = v.Validate(bl, "foo", 0, 0, policy)
+	err = v.Validate(bl, "lscc", 0, 0, policy)
 	assert.NoError(t, err)
 }
 
@@ -1578,7 +1578,7 @@ func validateUpgradeWithNewFailAllIP(t *testing.T, ccver string, v11capability, 
 		t.FailNow()
 	}
 
-	sProp2, _ := utils.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
+	sProp2, _ := protoutil.MockSignedEndorserProposal2OrPanic(chainId, &peer.ChaincodeSpec{}, id)
 	args := [][]byte{[]byte("deploy"), []byte(ccname), b}
 	if res := stublccc.MockInvokeWithSignedProposal("1", args, sProp2); res.Status != shim.OK {
 		fmt.Printf("%#v\n", res)
@@ -1601,7 +1601,7 @@ func validateUpgradeWithNewFailAllIP(t *testing.T, ccver string, v11capability, 
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1672,7 +1672,7 @@ func TestValidateUpgradeWithPoliciesFail(t *testing.T) {
 		t.Fatalf("createTx returned err %s", err)
 	}
 
-	envBytes, err := utils.GetBytesEnvelope(tx)
+	envBytes, err := protoutil.GetBytesEnvelope(tx)
 	if err != nil {
 		t.Fatalf("GetBytesEnvelope returned err %s", err)
 	}
@@ -1707,7 +1707,7 @@ func (c *mockPolicyChecker) CheckPolicy(channelID, policyName string, signedProp
 	return nil
 }
 
-func (c *mockPolicyChecker) CheckPolicyBySignedData(channelID, policyName string, sd []*common.SignedData) error {
+func (c *mockPolicyChecker) CheckPolicyBySignedData(channelID, policyName string, sd []*protoutil.SignedData) error {
 	return nil
 }
 
@@ -2012,4 +2012,11 @@ func TestInValidCollectionName(t *testing.T) {
 	for _, name := range inValidNames {
 		assert.Error(t, validateCollectionName(name), "Testing for name = "+name)
 	}
+}
+
+func TestNoopTranslator_Translate(t *testing.T) {
+	tr := &noopTranslator{}
+	res, err := tr.Translate([]byte("Nel mezzo del cammin di nostra vita"))
+	assert.NoError(t, err)
+	assert.Equal(t, res, []byte("Nel mezzo del cammin di nostra vita"))
 }

@@ -13,36 +13,39 @@ import (
 	"sync"
 	"time"
 
-	util2 "github.com/hyperledger/fabric/common/util"
+	commonutil "github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/committer"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	privdatacommon "github.com/hyperledger/fabric/gossip/privdata/common"
 	"github.com/hyperledger/fabric/protos/common"
-	gossip2 "github.com/hyperledger/fabric/protos/gossip"
+	protosgossip "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/pkg/errors"
-	"github.com/spf13/viper"
 )
 
-const (
-	reconcileSleepIntervalConfigKey = "peer.gossip.pvtData.reconcileSleepInterval"
-	reconcileSleepIntervalDefault   = time.Minute * 1
-	reconcileBatchSizeConfigKey     = "peer.gossip.pvtData.reconcileBatchSize"
-	reconcileBatchSizeDefault       = 10
-	reconciliationEnabledConfigKey  = "peer.gossip.pvtData.reconciliationEnabled"
-)
+//go:generate mockery -dir . -name ReconciliationFetcher -case underscore -output mocks/
+
+//go:generate mockery -dir . -name MissingPvtDataTracker -case underscore -output mocks/
+
+// MissingPvtDataTracker is the local interface used to generate mocks for foreign interface.
+type MissingPvtDataTracker interface {
+	ledger.MissingPvtDataTracker
+}
+
+//go:generate mockery -dir . -name ConfigHistoryRetriever -case underscore -output mocks/
+
+// ConfigHistoryRetriever is the local interface used to generate mocks for foreign interface.
+type ConfigHistoryRetriever interface {
+	ledger.ConfigHistoryRetriever
+}
 
 // ReconciliationFetcher interface which defines API to fetch
-// private data elements that have to be reconciled
+// private data elements that have to be reconciled.
 type ReconciliationFetcher interface {
 	FetchReconciledItems(dig2collectionConfig privdatacommon.Dig2CollectionConfig) (*privdatacommon.FetchedPvtDataContainer, error)
 }
 
-//go:generate mockery -dir . -name ReconciliationFetcher -case underscore -output mocks/
-//go:generate mockery -dir ../../core/ledger/ -name MissingPvtDataTracker -case underscore -output mocks/
-//go:generate mockery -dir ../../core/ledger/ -name ConfigHistoryRetriever -case underscore -output mocks/
-
-// Reconciler completes missing parts of private data that weren't available during commit time.
+// PvtDataReconciler completes missing parts of private data that weren't available during commit time.
 // this is done by getting from the ledger a list of missing private data and pulling it from the other peers.
 type PvtDataReconciler interface {
 	// Start function start the reconciler based on a scheduler, as was configured in reconciler creation
@@ -78,25 +81,9 @@ func (*NoOpReconciler) Stop() {
 
 // ReconcilerConfig holds config flags that are read from core.yaml
 type ReconcilerConfig struct {
-	sleepInterval time.Duration
-	batchSize     int
+	SleepInterval time.Duration
+	BatchSize     int
 	IsEnabled     bool
-}
-
-// this func reads reconciler configuration values from core.yaml and returns ReconcilerConfig
-func GetReconcilerConfig() *ReconcilerConfig {
-	reconcileSleepInterval := viper.GetDuration(reconcileSleepIntervalConfigKey)
-	if reconcileSleepInterval == 0 {
-		logger.Warning("Configuration key", reconcileSleepIntervalConfigKey, "isn't set, defaulting to", reconcileSleepIntervalDefault)
-		reconcileSleepInterval = reconcileSleepIntervalDefault
-	}
-	reconcileBatchSize := viper.GetInt(reconcileBatchSizeConfigKey)
-	if reconcileBatchSize == 0 {
-		logger.Warning("Configuration key", reconcileBatchSizeConfigKey, "isn't set, defaulting to", reconcileBatchSizeDefault)
-		reconcileBatchSize = reconcileBatchSizeDefault
-	}
-	isEnabled := viper.GetBool(reconciliationEnabledConfigKey)
-	return &ReconcilerConfig{sleepInterval: reconcileSleepInterval, batchSize: reconcileBatchSize, IsEnabled: isEnabled}
 }
 
 // NewReconciler creates a new instance of reconciler
@@ -130,7 +117,7 @@ func (r *Reconciler) run() {
 		select {
 		case <-r.stopChan:
 			return
-		case <-time.After(r.config.sleepInterval):
+		case <-time.After(r.config.SleepInterval):
 			logger.Debug("Start reconcile missing private info")
 			if err := r.reconcile(); err != nil {
 				logger.Error("Failed to reconcile missing private info, error: ", err.Error())
@@ -156,7 +143,7 @@ func (r *Reconciler) reconcile() error {
 	defer r.reportReconciliationDuration(time.Now())
 
 	for {
-		missingPvtDataInfo, err := missingPvtDataTracker.GetMissingPvtDataInfoForMostRecentBlocks(r.config.batchSize)
+		missingPvtDataInfo, err := missingPvtDataTracker.GetMissingPvtDataInfoForMostRecentBlocks(r.config.BatchSize)
 		if err != nil {
 			logger.Error("reconciliation error when trying to get missing pvt data info recent blocks:", err)
 			return err
@@ -277,7 +264,7 @@ func (r *Reconciler) getMostRecentCollectionConfig(chaincodeName string, collect
 	return staticCollectionConfig.StaticCollectionConfig, nil
 }
 
-func (r *Reconciler) preparePvtDataToCommit(elements []*gossip2.PvtDataElement) []*ledger.BlockPvtData {
+func (r *Reconciler) preparePvtDataToCommit(elements []*protosgossip.PvtDataElement) []*ledger.BlockPvtData {
 	rwSetByBlockByKeys := r.groupRwsetByBlock(elements)
 
 	// populate the private RWSets passed to the ledger
@@ -311,7 +298,7 @@ func (r *Reconciler) logMismatched(pvtdataMismatched []*ledger.PvtdataHashMismat
 }
 
 // return a mapping from block num to rwsetByKeys
-func (r *Reconciler) groupRwsetByBlock(elements []*gossip2.PvtDataElement) map[uint64]rwsetByKeys {
+func (r *Reconciler) groupRwsetByBlock(elements []*protosgossip.PvtDataElement) map[uint64]rwsetByKeys {
 	rwSetByBlockByKeys := make(map[uint64]rwsetByKeys) // map from block num to rwsetByKeys
 
 	// Iterate over data fetched from peers
@@ -321,7 +308,7 @@ func (r *Reconciler) groupRwsetByBlock(elements []*gossip2.PvtDataElement) map[u
 			rwSetByBlockByKeys[dig.BlockSeq] = make(map[rwSetKey][]byte)
 		}
 		for _, rws := range element.Payload {
-			hash := hex.EncodeToString(util2.ComputeSHA256(rws))
+			hash := hex.EncodeToString(commonutil.ComputeSHA256(rws))
 			key := rwSetKey{
 				txID:       dig.TxId,
 				namespace:  dig.Namespace,

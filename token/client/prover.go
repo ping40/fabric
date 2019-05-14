@@ -82,14 +82,14 @@ func (pc *ProverPeerClientImpl) Certificate() *tls.Certificate {
 	return &cert
 }
 
-// RequestImport allows the client to submit an issue request to a prover peer service;
+// RequestIssue allows the client to submit an issue request to a prover peer service;
 // the function takes as parameters tokensToIssue and the signing identity of the client;
 // it returns a marshalled TokenTransaction and an error message in the case the request fails.
-func (prover *ProverPeer) RequestImport(tokensToIssue []*token.TokenToIssue, signingIdentity tk.SigningIdentity) ([]byte, error) {
-	ir := &token.ImportRequest{
+func (prover *ProverPeer) RequestIssue(tokensToIssue []*token.Token, signingIdentity tk.SigningIdentity) ([]byte, error) {
+	ir := &token.IssueRequest{
 		TokensToIssue: tokensToIssue,
 	}
-	payload := &token.Command_ImportRequest{ImportRequest: ir}
+	payload := &token.Command_IssueRequest{IssueRequest: ir}
 
 	sc, err := prover.CreateSignedCommand(payload, signingIdentity)
 	if err != nil {
@@ -104,7 +104,7 @@ func (prover *ProverPeer) RequestImport(tokensToIssue []*token.TokenToIssue, sig
 // to be transferred and the shares describing how they are going to be distributed
 // among recipients; it returns a marshalled token transaction and an error message in the case the
 // request fails
-func (prover *ProverPeer) RequestTransfer(tokenIDs []*token.TokenId, shares []*token.RecipientTransferShare, signingIdentity tk.SigningIdentity) ([]byte, error) {
+func (prover *ProverPeer) RequestTransfer(tokenIDs []*token.TokenId, shares []*token.RecipientShare, signingIdentity tk.SigningIdentity) ([]byte, error) {
 
 	tr := &token.TransferRequest{
 		Shares:   shares,
@@ -124,10 +124,10 @@ func (prover *ProverPeer) RequestTransfer(tokenIDs []*token.TokenId, shares []*t
 // It queries the ledger to read detail for each token id.
 // It creates a token transaction with an output for redeemed tokens and
 // possibly another output to transfer the remaining tokens, if any, to the same user
-func (prover *ProverPeer) RequestRedeem(tokenIDs []*token.TokenId, quantity uint64, signingIdentity tk.SigningIdentity) ([]byte, error) {
+func (prover *ProverPeer) RequestRedeem(tokenIDs []*token.TokenId, quantity string, signingIdentity tk.SigningIdentity) ([]byte, error) {
 	rr := &token.RedeemRequest{
-		QuantityToRedeem: quantity,
-		TokenIds:         tokenIDs,
+		Quantity: quantity,
+		TokenIds: tokenIDs,
 	}
 	payload := &token.Command_RedeemRequest{RedeemRequest: rr}
 
@@ -140,8 +140,8 @@ func (prover *ProverPeer) RequestRedeem(tokenIDs []*token.TokenId, quantity uint
 }
 
 // ListTokens allows the client to submit a list request to a prover peer service;
-// it returns a list of TokenOutput and an error message in the case the request fails
-func (prover *ProverPeer) ListTokens(signingIdentity tk.SigningIdentity) ([]*token.TokenOutput, error) {
+// it returns a list of UnspentToken and an error message in the case the request fails
+func (prover *ProverPeer) ListTokens(signingIdentity tk.SigningIdentity) ([]*token.UnspentToken, error) {
 	payload := &token.Command_ListRequest{ListRequest: &token.ListRequest{}}
 	sc, err := prover.CreateSignedCommand(payload, signingIdentity)
 	if err != nil {
@@ -159,7 +159,7 @@ func (prover *ProverPeer) ListTokens(signingIdentity tk.SigningIdentity) ([]*tok
 	return commandResp.GetUnspentTokens().GetTokens(), nil
 }
 
-// SendCommand is for issue, transfer, redeem, approve, and transferFrom commands that will create a token transaction.
+// SendCommand is for issue, transfer and redeem commands that will create a token transaction.
 // It calls prover to process command and returns marshalled token transaction.
 func (prover *ProverPeer) SendCommand(ctx context.Context, sc *token.SignedCommand) ([]byte, error) {
 	commandResp, err := prover.processCommand(ctx, sc)
@@ -255,7 +255,7 @@ func (prover *ProverPeer) CreateSignedCommand(payload interface{}, signingIdenti
 
 func commandFromPayload(payload interface{}) (*token.Command, error) {
 	switch t := payload.(type) {
-	case *token.Command_ImportRequest:
+	case *token.Command_IssueRequest:
 		return &token.Command{Payload: t}, nil
 	case *token.Command_RedeemRequest:
 		return &token.Command{Payload: t}, nil

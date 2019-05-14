@@ -12,14 +12,21 @@ import (
 
 	"github.com/hyperledger/fabric/common/channelconfig"
 	commonledger "github.com/hyperledger/fabric/common/ledger"
+	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/common/util"
-	"github.com/hyperledger/fabric/core/chaincode"
+	"github.com/hyperledger/fabric/core/aclmgmt"
 	"github.com/hyperledger/fabric/core/chaincode/lifecycle"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
+	"github.com/hyperledger/fabric/core/handlers/validation/api/state"
 	"github.com/hyperledger/fabric/core/ledger"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
+
+//go:generate counterfeiter -o mock/aclprovider.go --fake-name ACLProvider . aclProvider
+type aclProvider interface {
+	aclmgmt.ACLProvider
+}
 
 //go:generate counterfeiter -o mock/chaincode_stub.go --fake-name ChaincodeStub . chaincodeStub
 type chaincodeStub interface {
@@ -63,11 +70,6 @@ type resultsIterator interface {
 	commonledger.ResultsIterator
 }
 
-//go:generate counterfeiter -o mock/chaincode_lifecycle.go --fake-name ChaincodeLifecycle . chaincodeLifecycle
-type chaincodeLifecycle interface {
-	chaincode.Lifecycle
-}
-
 //go:generate counterfeiter -o mock/channel_config.go --fake-name ChannelConfig . channelConfig
 type channelConfig interface {
 	channelconfig.Resources
@@ -81,6 +83,21 @@ type applicationConfig interface {
 //go:generate counterfeiter -o mock/application_org_config.go --fake-name ApplicationOrgConfig . applicationOrgConfig
 type applicationOrgConfig interface {
 	channelconfig.ApplicationOrg
+}
+
+//go:generate counterfeiter -o mock/policy_manager.go --fake-name PolicyManager . policyManager
+type policyManager interface {
+	policies.Manager
+}
+
+//go:generate counterfeiter -o mock/application_capabilities.go --fake-name ApplicationCapabilities . applicationCapabilities
+type applicationCapabilities interface {
+	channelconfig.ApplicationCapabilities
+}
+
+//go:generate counterfeiter -o mock/validation_state.go --fake-name ValidationState . validationState
+type validationState interface {
+	validation.State
 }
 
 func TestLifecycle(t *testing.T) {

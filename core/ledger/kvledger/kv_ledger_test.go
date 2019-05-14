@@ -16,32 +16,41 @@ import (
 	"github.com/hyperledger/fabric/common/util"
 	lgr "github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/txmgr"
-	"github.com/hyperledger/fabric/core/ledger/ledgerconfig"
-	ledgertestutil "github.com/hyperledger/fabric/core/ledger/testutil"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/ledger/queryresult"
 	"github.com/hyperledger/fabric/protos/peer"
-	putils "github.com/hyperledger/fabric/protos/utils"
-	"github.com/spf13/viper"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMain(m *testing.M) {
-	ledgertestutil.SetupCoreYAMLConfig()
 	flogging.ActivateSpec("lockbasedtxmgr,statevalidator,valimpl,confighistory,pvtstatepurgemgmt=debug")
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/ledgertests/kvledger")
-	viper.Set("ledger.history.enableHistoryDatabase", true)
 	os.Exit(m.Run())
 }
 
+func TestKVLedgerNilHistoryDBProvider(t *testing.T) {
+	kvl := &kvLedger{}
+	qe, err := kvl.NewHistoryQueryExecutor()
+	assert.Nil(
+		t,
+		qe,
+		"NewHistoryQueryExecutor should return nil when history db provider is nil",
+	)
+	assert.NoError(
+		t,
+		err,
+		"NewHistoryQueryExecutor should return an error when history db provider is nil",
+	)
+}
+
 func TestKVLedgerBlockStorage(t *testing.T) {
-	env := newTestEnv(t)
-	defer env.cleanup()
-	provider := testutilNewProvider(t)
+	conf, cleanup := testConfig(t)
+	defer cleanup()
+	provider := testutilNewProvider(conf, t)
 	defer provider.Close()
 
 	bg, gb := testutil.NewBlockGenerator(t, "testLedger", false)
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := provider.Create(gb)
 	defer ledger.Close()
 
@@ -62,7 +71,7 @@ func TestKVLedgerBlockStorage(t *testing.T) {
 	ledger.CommitWithPvtData(&lgr.BlockAndPvtData{Block: block1})
 
 	bcInfo, _ = ledger.GetBlockchainInfo()
-	block1Hash := block1.Header.Hash()
+	block1Hash := protoutil.BlockHeaderHash(block1.Header)
 	assert.Equal(t, &common.BlockchainInfo{
 		Height: 2, CurrentBlockHash: block1Hash, PreviousBlockHash: gbHash,
 	}, bcInfo)
@@ -79,7 +88,7 @@ func TestKVLedgerBlockStorage(t *testing.T) {
 	ledger.CommitWithPvtData(&lgr.BlockAndPvtData{Block: block2})
 
 	bcInfo, _ = ledger.GetBlockchainInfo()
-	block2Hash := block2.Header.Hash()
+	block2Hash := protoutil.BlockHeaderHash(block2.Header)
 	assert.Equal(t, &common.BlockchainInfo{
 		Height: 3, CurrentBlockHash: block2Hash, PreviousBlockHash: block1Hash}, bcInfo)
 
@@ -97,11 +106,11 @@ func TestKVLedgerBlockStorage(t *testing.T) {
 
 	// get the tran id from the 2nd block, then use it to test GetTransactionByID()
 	txEnvBytes2 := block1.Data.Data[0]
-	txEnv2, err := putils.GetEnvelopeFromBlock(txEnvBytes2)
+	txEnv2, err := protoutil.GetEnvelopeFromBlock(txEnvBytes2)
 	assert.NoError(t, err, "Error upon GetEnvelopeFromBlock")
-	payload2, err := putils.GetPayload(txEnv2)
+	payload2, err := protoutil.GetPayload(txEnv2)
 	assert.NoError(t, err, "Error upon GetPayload")
-	chdr, err := putils.UnmarshalChannelHeader(payload2.Header.ChannelHeader)
+	chdr, err := protoutil.UnmarshalChannelHeader(payload2.Header.ChannelHeader)
 	assert.NoError(t, err, "Error upon GetChannelHeaderFromBytes")
 	txID2 := chdr.TxId
 	processedTran2, err := ledger.GetTransactionByID(txID2)
@@ -121,13 +130,13 @@ func TestKVLedgerBlockStorage(t *testing.T) {
 
 func TestKVLedgerBlockStorageWithPvtdata(t *testing.T) {
 	t.Skip()
-	env := newTestEnv(t)
-	defer env.cleanup()
-	provider := testutilNewProvider(t)
+	conf, cleanup := testConfig(t)
+	defer cleanup()
+	provider := testutilNewProvider(conf, t)
 	defer provider.Close()
 
 	bg, gb := testutil.NewBlockGenerator(t, "testLedger", false)
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := provider.Create(gb)
 	defer ledger.Close()
 
@@ -148,7 +157,7 @@ func TestKVLedgerBlockStorageWithPvtdata(t *testing.T) {
 	assert.NoError(t, ledger.CommitWithPvtData(&lgr.BlockAndPvtData{Block: block1}))
 
 	bcInfo, _ = ledger.GetBlockchainInfo()
-	block1Hash := block1.Header.Hash()
+	block1Hash := protoutil.BlockHeaderHash(block1.Header)
 	assert.Equal(t, &common.BlockchainInfo{
 		Height: 2, CurrentBlockHash: block1Hash, PreviousBlockHash: gbHash,
 	}, bcInfo)
@@ -165,7 +174,7 @@ func TestKVLedgerBlockStorageWithPvtdata(t *testing.T) {
 	ledger.CommitWithPvtData(&lgr.BlockAndPvtData{Block: block2})
 
 	bcInfo, _ = ledger.GetBlockchainInfo()
-	block2Hash := block2.Header.Hash()
+	block2Hash := protoutil.BlockHeaderHash(block2.Header)
 	assert.Equal(t, &common.BlockchainInfo{
 		Height: 3, CurrentBlockHash: block2Hash, PreviousBlockHash: block1Hash,
 	}, bcInfo)
@@ -191,17 +200,20 @@ func TestKVLedgerDBRecovery(t *testing.T) {
 }
 
 func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
-	env := newTestEnv(t)
-	defer env.cleanup()
-	provider := testutilNewProviderWithCollectionConfig(t,
-		"ns", map[string]uint64{"coll": 0},
+	conf, cleanup := testConfig(t)
+	defer cleanup()
+	provider := testutilNewProviderWithCollectionConfig(
+		t,
+		"ns",
+		map[string]uint64{"coll": 0},
+		conf,
 	)
 	defer provider.Close()
 	testLedgerid := "testLedger"
 	bg, gb := testutil.NewBlockGenerator(t, testLedgerid, false)
 	ledger, _ := provider.Create(gb)
 	defer ledger.Close()
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	checkBCSummaryForTest(t, ledger,
 		&bcSummary{
 			bcInfo: &common.BlockchainInfo{Height: 1, CurrentBlockHash: gbHash, PreviousBlockHash: nil},
@@ -216,7 +228,7 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 	checkBCSummaryForTest(t, ledger,
 		&bcSummary{
 			bcInfo: &common.BlockchainInfo{Height: 2,
-				CurrentBlockHash:  blockAndPvtdata1.Block.Header.Hash(),
+				CurrentBlockHash:  protoutil.BlockHeaderHash(blockAndPvtdata1.Block.Header),
 				PreviousBlockHash: gbHash},
 		},
 	)
@@ -237,8 +249,8 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 	checkBCSummaryForTest(t, ledger,
 		&bcSummary{
 			bcInfo: &common.BlockchainInfo{Height: 3,
-				CurrentBlockHash:  blockAndPvtdata2.Block.Header.Hash(),
-				PreviousBlockHash: blockAndPvtdata1.Block.Header.Hash()},
+				CurrentBlockHash:  protoutil.BlockHeaderHash(blockAndPvtdata2.Block.Header),
+				PreviousBlockHash: protoutil.BlockHeaderHash(blockAndPvtdata1.Block.Header)},
 
 			stateDBSavePoint: uint64(1),
 			stateDBKVs:       map[string]string{"key1": "value1.1", "key2": "value2.1", "key3": "value3.1"},
@@ -255,8 +267,11 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 
 	// Here the peer comes online and calls NewKVLedger to get a handler for the ledger
 	// StateDB and HistoryDB should be recovered before returning from NewKVLedger call
-	provider = testutilNewProviderWithCollectionConfig(t,
-		"ns", map[string]uint64{"coll": 0},
+	provider = testutilNewProviderWithCollectionConfig(
+		t,
+		"ns",
+		map[string]uint64{"coll": 0},
+		conf,
 	)
 	ledger, _ = provider.Open(testLedgerid)
 	checkBCSummaryForTest(t, ledger,
@@ -289,8 +304,8 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 	checkBCSummaryForTest(t, ledger,
 		&bcSummary{
 			bcInfo: &common.BlockchainInfo{Height: 4,
-				CurrentBlockHash:  blockAndPvtdata3.Block.Header.Hash(),
-				PreviousBlockHash: blockAndPvtdata2.Block.Header.Hash()},
+				CurrentBlockHash:  protoutil.BlockHeaderHash(blockAndPvtdata3.Block.Header),
+				PreviousBlockHash: protoutil.BlockHeaderHash(blockAndPvtdata2.Block.Header)},
 
 			stateDBSavePoint: uint64(3),
 			stateDBKVs:       map[string]string{"key1": "value1.3", "key2": "value2.3", "key3": "value3.3"},
@@ -306,8 +321,11 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 
 	// we assume here that the peer comes online and calls NewKVLedger to get a handler for the ledger
 	// history DB should be recovered before returning from NewKVLedger call
-	provider = testutilNewProviderWithCollectionConfig(t,
-		"ns", map[string]uint64{"coll": 0},
+	provider = testutilNewProviderWithCollectionConfig(
+		t,
+		"ns",
+		map[string]uint64{"coll": 0},
+		conf,
 	)
 	ledger, _ = provider.Open(testLedgerid)
 
@@ -340,8 +358,8 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 	checkBCSummaryForTest(t, ledger,
 		&bcSummary{
 			bcInfo: &common.BlockchainInfo{Height: 5,
-				CurrentBlockHash:  blockAndPvtdata4.Block.Header.Hash(),
-				PreviousBlockHash: blockAndPvtdata3.Block.Header.Hash()},
+				CurrentBlockHash:  protoutil.BlockHeaderHash(blockAndPvtdata4.Block.Header),
+				PreviousBlockHash: protoutil.BlockHeaderHash(blockAndPvtdata3.Block.Header)},
 
 			stateDBSavePoint: uint64(3),
 			stateDBKVs:       map[string]string{"key1": "value1.3", "key2": "value2.3", "key3": "value3.3"},
@@ -357,8 +375,11 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 
 	// we assume here that the peer comes online and calls NewKVLedger to get a handler for the ledger
 	// state DB should be recovered before returning from NewKVLedger call
-	provider = testutilNewProviderWithCollectionConfig(t,
-		"ns", map[string]uint64{"coll": 0},
+	provider = testutilNewProviderWithCollectionConfig(
+		t,
+		"ns",
+		map[string]uint64{"coll": 0},
+		conf,
 	)
 	ledger, _ = provider.Open(testLedgerid)
 	checkBCSummaryForTest(t, ledger,
@@ -375,10 +396,13 @@ func testSyncStateAndHistoryDBWithBlockstore(t *testing.T) {
 }
 
 func testSyncStateDBWithPvtdatastore(t *testing.T) {
-	env := newTestEnv(t)
-	defer env.cleanup()
-	provider := testutilNewProviderWithCollectionConfig(t,
-		"ns", map[string]uint64{"coll": 0},
+	conf, cleanup := testConfig(t)
+	defer cleanup()
+	provider := testutilNewProviderWithCollectionConfig(
+		t,
+		"ns",
+		map[string]uint64{"coll": 0},
+		conf,
 	)
 	defer provider.Close()
 	testLedgerid := "testLedger"
@@ -423,8 +447,11 @@ func testSyncStateDBWithPvtdatastore(t *testing.T) {
 
 	// Here the peer comes online and calls NewKVLedger to get a handler for the ledger
 	// StateDB and HistoryDB should be recovered before returning from NewKVLedger call
-	provider = testutilNewProviderWithCollectionConfig(t,
-		"ns", map[string]uint64{"coll": 0},
+	provider = testutilNewProviderWithCollectionConfig(
+		t,
+		"ns",
+		map[string]uint64{"coll": 0},
+		conf,
 	)
 	ledger, _ = provider.Open(testLedgerid)
 
@@ -436,19 +463,12 @@ func testSyncStateDBWithPvtdatastore(t *testing.T) {
 }
 
 func TestLedgerWithCouchDbEnabledWithBinaryAndJSONData(t *testing.T) {
-
-	//call a helper method to load the core.yaml
-	ledgertestutil.SetupCoreYAMLConfig()
-
-	logger.Debugf("TestLedgerWithCouchDbEnabledWithBinaryAndJSONData  IsCouchDBEnabled()value: %v , IsHistoryDBEnabled()value: %v\n",
-		ledgerconfig.IsCouchDBEnabled(), ledgerconfig.IsHistoryDBEnabled())
-
-	env := newTestEnv(t)
-	defer env.cleanup()
-	provider := testutilNewProvider(t)
+	conf, cleanup := testConfig(t)
+	defer cleanup()
+	provider := testutilNewProvider(conf, t)
 	defer provider.Close()
 	bg, gb := testutil.NewBlockGenerator(t, "testLedger", false)
-	gbHash := gb.Header.Hash()
+	gbHash := protoutil.BlockHeaderHash(gb.Header)
 	ledger, _ := provider.Create(gb)
 	defer ledger.Close()
 
@@ -470,7 +490,7 @@ func TestLedgerWithCouchDbEnabledWithBinaryAndJSONData(t *testing.T) {
 	ledger.CommitWithPvtData(&lgr.BlockAndPvtData{Block: block1})
 
 	bcInfo, _ = ledger.GetBlockchainInfo()
-	block1Hash := block1.Header.Hash()
+	block1Hash := protoutil.BlockHeaderHash(block1.Header)
 	assert.Equal(t, &common.BlockchainInfo{
 		Height: 2, CurrentBlockHash: block1Hash, PreviousBlockHash: gbHash}, bcInfo)
 
@@ -501,7 +521,7 @@ func TestLedgerWithCouchDbEnabledWithBinaryAndJSONData(t *testing.T) {
 	ledger.CommitWithPvtData(&lgr.BlockAndPvtData{Block: block2})
 
 	bcInfo, _ = ledger.GetBlockchainInfo()
-	block2Hash := block2.Header.Hash()
+	block2Hash := protoutil.BlockHeaderHash(block2.Header)
 	assert.Equal(t, &common.BlockchainInfo{
 		Height: 3, CurrentBlockHash: block2Hash, PreviousBlockHash: block1Hash,
 	}, bcInfo)
@@ -525,7 +545,7 @@ func TestLedgerWithCouchDbEnabledWithBinaryAndJSONData(t *testing.T) {
 	assert.True(t, proto.Equal(b2, block2), "proto messages are not equal")
 
 	//Similar test has been pushed down to historyleveldb_test.go as well
-	if ledgerconfig.IsHistoryDBEnabled() == true {
+	if conf.HistoryDB.Enabled {
 		logger.Debugf("History is enabled\n")
 		qhistory, err := ledger.NewHistoryQueryExecutor()
 		assert.NoError(t, err, "Error when trying to retrieve history database executor")

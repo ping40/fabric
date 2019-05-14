@@ -12,12 +12,16 @@ definition listing the organizations in the collection, as well as properties
 used to control dissemination of private data at endorsement time and,
 optionally, whether the data will be purged.
 
-The collection definition gets deployed to the channel at the time of chaincode
-instantiation (or upgrade). If using the peer CLI to instantiate the chaincode, the
-collection definition file is passed to the chaincode instantiation
-using the ``--collections-config`` flag. If using a client SDK, check the `SDK
-documentation <https://fabric-sdk-node.github.io/>`_ for information on providing the collection
-definition.
+Beginning with the Fabric chaincode lifecycle introduced with the Fabric v2.0
+Alpha, the collection definition is part of the chaincode definition. The
+collection is approved by channel members, and then deployed when the chaincode
+definition is committed to the channel. The collection file needs to be the same
+for all channel members. If you are using the peer CLI to approve and commit the
+chaincode definition, use the ``--collections-config`` flag to specify the path
+to the collection definition file. If you are using the Fabric SDK for Node.js,
+visit `How to install and start your chaincode <https://fabric-sdk-node.github.io/master/tutorial-chaincode-lifecycle.html>`_.
+To use the `previous lifecycle process <https://hyperledger-fabric.readthedocs.io/en/release-1.4/chaincode4noah.html>`_ to deploy a private data collection,
+use the ``--collections-config`` flag when `instantiating your chaincode <https://hyperledger-fabric.readthedocs.io/en/latest/commands/peerchaincode.html#peer-chaincode-instantiate>`_.
 
 Collection definitions are composed of the following properties:
 
@@ -60,8 +64,10 @@ Collection definitions are composed of the following properties:
 * ``blockToLive``: Represents how long the data should live on the private
   database in terms of blocks. The data will live for this specified number of
   blocks on the private database and after that it will get purged, making this
-  data obsolete from the network. To keep private data indefinitely, that is, to
-  never purge private data, set the ``blockToLive`` property to ``0``.
+  data obsolete from the network so that it cannot be queried from chaincode,
+  and cannot be made available to requesting peers. To keep private data
+  indefinitely, that is, to never purge private data, set the ``blockToLive``
+  property to ``0``.
 
 * ``memberOnlyRead``: a value of ``true`` indicates that peers automatically
   enforce that only clients belonging to one of the collection member organizations
@@ -104,8 +110,8 @@ to a subset of organizations in the channel (in this case ``Org1`` ). In a real
 scenario, there would be many organizations in the channel, with two or more
 organizations in each collection sharing private data between them.
 
-Endorsement
-~~~~~~~~~~~
+Private data dissemination
+--------------------------
 
 Since private data is not included in the transactions that get submitted to
 the ordering service, and therefore not included in the blocks that get distributed
@@ -123,9 +129,6 @@ in an effort to ensure that each authorized organization has a copy of the priva
 data. Since transactions are not committed at chaincode execution time, the endorsing
 peer and recipient peers store a copy of the private data in a local ``transient store``
 alongside their blockchain until the transaction is committed.
-
-How private data is committed
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When authorized peers do not have a copy of the private data in their transient
 data store at commit time (either because they were not an endorsing peer or because
@@ -164,7 +167,8 @@ properties will have ensured the private data is available on other peers.
 
 .. note:: For collections to work, it is important to have cross organizational
           gossip configured correctly. Refer to our documentation on :doc:`gossip`,
-          paying particular attention to the section on "anchor peers".
+          paying particular attention to the "anchor peers" and "external endpoint"
+          configuration.
 
 Referencing collections from chaincode
 --------------------------------------
@@ -190,23 +194,6 @@ data), to chaincode invocation on the peer.  The chaincode can retrieve the
 ``transient`` field by calling the `GetTransient() API <https://github.com/hyperledger/fabric/blob/8b3cbda97e58d1a4ff664219244ffd1d89d7fba8/core/chaincode/shim/interfaces.go#L315-L321>`_.
 This ``transient`` field gets excluded from the channel transaction.
 
-Reconciliation
-~~~~~~~~~~~~~~
-
-Starting in v1.4, a background process allows peers who are part of a collection
-to receive data they were entitled to receive but did not yet receive --- because of
-a network failure, for example --- by keeping track of private data that was "missing"
-at the time of block commit. The peer will periodically attempt to fetch the private
-data from other collection member peers that are expected to have it.
-
-This "reconciliation" also applies to peers of new organizations that are added to
-an existing collection. The same background process described above
-will also attempt to fetch private data that was committed before they joined
-the collection.
-
-Note that this private data reconciliation feature only works on peers running
-v1.4 or later of Fabric.
-
 Access control for private data
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -225,13 +212,10 @@ configuration definitions and how to set them, refer back to the
           chaincode API or using the client identity
           `chaincode library <https://github.com/hyperledger/fabric/tree/master/core/chaincode/shim/ext/cid>`__ .
 
-Considerations when using private data
---------------------------------------
-
 Querying Private Data
 ~~~~~~~~~~~~~~~~~~~~~
 
-Private collection data can be queried just like normal channel data, using
+Private data collection can be queried just like normal channel data, using
 shim APIs:
 
 * ``GetPrivateDataByRange(collection, startKey, endKey string)``
@@ -261,7 +245,12 @@ Limitations:
   all peers can validate key reads based on the hashed key version.
 
 Using Indexes with collections
-------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. note:: The Fabric chaincode lifecycle being introduced in the Fabric v2.0
+         Alpha does not support using couchDB indexes with your chaincode. To use
+         the previous lifecycle model to deploy couchDB indexes with private data
+         collections, visit the v1.4 version of the `Private Data Architecture Guide <https://hyperledger-fabric.readthedocs.io/en/release-1.4/private-data-arch.html>`_.
 
 The topic :doc:`couchdb_as_state_database` describes indexes that can be
 applied to the channel’s state database to enable JSON content queries, by
@@ -270,13 +259,16 @@ installation time.  Similarly, indexes can also be applied to private data
 collections, by packaging indexes in a ``META-INF/statedb/couchdb/collections/<collection_name>/indexes``
 directory. An example index is available `here <https://github.com/hyperledger/fabric-samples/blob/master/chaincode/marbles02_private/go/META-INF/statedb/couchdb/collections/collectionMarbles/indexes/indexOwner.json>`_.
 
-Private Data Purging
+Considerations when using private data
+--------------------------------------
+
+Private data purging
 ~~~~~~~~~~~~~~~~~~~~
 
-To keep private data indefinitely, that is, to never purge private data,
-set ``blockToLive`` property to ``0``.
+Private data can be periodically purged from peers. For more details,
+see the ``blockToLive`` collection definition property above.
 
-Recall that prior to commit, peers store private data in a local
+Additionally, recall that prior to commit, peers store private data in a local
 transient data store. This data automatically gets purged when the transaction
 commits.  But if a transaction was never submitted to the channel and
 therefore never committed, the private data would remain in each peer’s
@@ -285,19 +277,47 @@ configurable number blocks by using the peer’s
 ``peer.gossip.pvtData.transientstoreMaxBlockRetention`` property in the peer
 ``core.yaml`` file.
 
-Upgrading a collection definition
----------------------------------
+Updating a collection definition
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If a collection is referenced by a chaincode, the chaincode will use the prior
-collection definition unless a new collection definition is specified at upgrade
-time. If a collection configuration is specified during the upgrade, a definition
-for each of the existing collections must be included, and you can add new
-collection definitions.
+To update a collection definition or add a new collection, you can upgrade
+the chaincode to a new version and pass the new collection configuration
+in the chaincode upgrade transaction, for example using the ``--collections-config``
+flag if using the CLI. If a collection configuration is specified during the
+chaincode upgrade, a definition for each of the existing collections must be
+included.
+
+When upgrading a chaincode, you can add new private data collections,
+and update existing private data collections, for example to add new
+members to an existing collection or change one of the collection definition
+properties. Note that you cannot update the collection name or the
+blockToLive property, since a consistent blockToLive is required
+regardless of a peer's block height.
 
 Collection updates becomes effective when a peer commits the block that
 contains the chaincode upgrade transaction. Note that collections cannot be
 deleted, as there may be prior private data hashes on the channel’s blockchain
 that cannot be removed.
+
+Private data reconciliation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Starting in v1.4, peers of organizations that are added to an existing collection
+will automatically fetch private data that was committed to the collection before
+they joined the collection.
+
+This private data "reconciliation" also applies to peers that
+were entitled to receive private data but did not yet receive it --- because of
+a network failure, for example --- by keeping track of private data that was "missing"
+at the time of block commit.
+
+Private data reconciliation occurs periodically based on the
+``peer.gossip.pvtData.reconciliationEnabled`` and ``peer.gossip.pvtData.reconcileSleepInterval``
+properties in core.yaml. The peer will periodically attempt to fetch the private
+data from other collection member peers that are expected to have it.
+
+Note that this private data reconciliation feature only works on peers running
+v1.4 or later of Fabric.
 
 .. Licensed under Creative Commons Attribution 4.0 International License
    https://creativecommons.org/licenses/by/4.0/

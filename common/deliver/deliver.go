@@ -25,7 +25,7 @@ import (
 	"github.com/hyperledger/fabric/core/comm"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -190,7 +190,7 @@ func isFiltered(srv *Server) bool {
 
 func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.Envelope) (status cb.Status, err error) {
 	addr := util.ExtractRemoteAddress(ctx)
-	payload, err := utils.UnmarshalPayload(envelope.Payload)
+	payload, err := protoutil.UnmarshalPayload(envelope.Payload)
 	if err != nil {
 		logger.Warningf("Received an envelope from %s with no payload: %s", addr, err)
 		return cb.Status_BAD_REQUEST, nil
@@ -201,7 +201,7 @@ func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.E
 		return cb.Status_BAD_REQUEST, nil
 	}
 
-	chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 	if err != nil {
 		logger.Warningf("Failed to unmarshal channel header from %s: %s", addr, err)
 		return cb.Status_BAD_REQUEST, nil
@@ -231,7 +231,18 @@ func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.E
 		h.Metrics.RequestsCompleted.With(labels...).Add(1)
 	}()
 
+	seekInfo := &ab.SeekInfo{}
+	if err = proto.Unmarshal(payload.Data, seekInfo); err != nil {
+		logger.Warningf("[channel: %s] Received a signed deliver request from %s with malformed seekInfo payload: %s", chdr.ChannelId, addr, err)
+		return cb.Status_BAD_REQUEST, nil
+	}
+
 	erroredChan := chain.Errored()
+	if seekInfo.ErrorResponse == ab.SeekInfo_BEST_EFFORT {
+		// In a 'best effort' delivery of blocks, we should ignore consenter errors
+		// and continue to deliver blocks according to the client's request.
+		erroredChan = nil
+	}
 	select {
 	case <-erroredChan:
 		logger.Warningf("[channel: %s] Rejecting deliver request for %s because of consenter error", chdr.ChannelId, addr)
@@ -248,12 +259,6 @@ func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.E
 	if err := accessControl.Evaluate(); err != nil {
 		logger.Warningf("[channel: %s] Client authorization revoked for deliver request from %s: %s", chdr.ChannelId, addr, err)
 		return cb.Status_FORBIDDEN, nil
-	}
-
-	seekInfo := &ab.SeekInfo{}
-	if err = proto.Unmarshal(payload.Data, seekInfo); err != nil {
-		logger.Warningf("[channel: %s] Received a signed deliver request from %s with malformed seekInfo payload: %s", chdr.ChannelId, addr, err)
-		return cb.Status_BAD_REQUEST, nil
 	}
 
 	if seekInfo.Start == nil || seekInfo.Stop == nil {
@@ -308,7 +313,9 @@ func (h *Handler) deliverBlocks(ctx context.Context, srv *Server, envelope *cb.E
 			logger.Debugf("Context canceled, aborting wait for next block")
 			return cb.Status_INTERNAL_SERVER_ERROR, errors.Wrapf(ctx.Err(), "context finished before block retrieved")
 		case <-erroredChan:
-			logger.Warningf("Aborting deliver for request because of background error")
+			// TODO, today, the only user of the errorChan is the orderer consensus implementations.  If the peer ever reports
+			// this error, we will need to update this error message, possibly finding a way to signal what error text to return.
+			logger.Warningf("Aborting deliver for request because the backing consensus implementation indicates an error")
 			return cb.Status_SERVICE_UNAVAILABLE, nil
 		case <-iterCh:
 			// Iterator has set the block and status vars

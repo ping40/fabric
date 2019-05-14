@@ -22,12 +22,13 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/bccsp/factory"
 	"github.com/hyperledger/fabric/common/flogging"
-	false_crypto "github.com/hyperledger/fabric/common/mocks/crypto"
 	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/orderer/common/cluster"
+	"github.com/hyperledger/fabric/orderer/common/cluster/mocks"
 	"github.com/hyperledger/fabric/protos/common"
 	"github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
@@ -45,8 +46,15 @@ func init() {
 	factory.InitFactories(nil)
 }
 
+//go:generate counterfeiter -o mocks/signer_serializer.go --fake-name SignerSerializer . signerSerializer
+
+type signerSerializer interface {
+	identity.SignerSerializer
+}
+
 type wrappedBalancer struct {
 	balancer.Balancer
+	balancer.V2Balancer
 	cd *countingDialer
 }
 
@@ -82,7 +90,12 @@ func newCountingDialer() *countingDialer {
 
 func (d *countingDialer) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
 	defer atomic.AddUint32(&d.connectionCount, 1)
-	return &wrappedBalancer{Balancer: d.baseBuilder.Build(cc, opts), cd: d}
+	lb := d.baseBuilder.Build(cc, opts)
+	return &wrappedBalancer{
+		Balancer:   lb,
+		V2Balancer: lb.(balancer.V2Balancer),
+		cd:         d,
+	}
 }
 
 func (d *countingDialer) Name() string {
@@ -97,14 +110,14 @@ func (d *countingDialer) assertAllConnectionsClosed(t *testing.T) {
 	assert.Equal(t, uint32(0), atomic.LoadUint32(&d.connectionCount))
 }
 
-func (d *countingDialer) Dial(address string) (*grpc.ClientConn, error) {
+func (d *countingDialer) Dial(address cluster.EndpointCriteria) (*grpc.ClientConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
 	defer cancel()
 
 	gRPCBalancerLock.Lock()
 	balancer := grpc.WithBalancerName(d.name)
 	gRPCBalancerLock.Unlock()
-	return grpc.DialContext(ctx, address, grpc.WithBlock(), grpc.WithInsecure(), balancer)
+	return grpc.DialContext(ctx, address.Endpoint, grpc.WithBlock(), grpc.WithInsecure(), balancer)
 }
 
 func noopBlockVerifierf(_ []*common.Block, _ string) error {
@@ -116,7 +129,7 @@ func readSeekEnvelope(stream orderer.AtomicBroadcast_DeliverServer) (*orderer.Se
 	if err != nil {
 		return nil, "", err
 	}
-	payload, err := utils.UnmarshalPayload(env.Payload)
+	payload, err := protoutil.UnmarshalPayload(env.Payload)
 	if err != nil {
 		return nil, "", err
 	}
@@ -138,6 +151,10 @@ type deliverServer struct {
 	srv            *comm.GRPCServer
 	seekAssertions chan func(*orderer.SeekInfo, string)
 	blockResponses chan *orderer.DeliverResponse
+}
+
+func (ds *deliverServer) endpointCriteria() cluster.EndpointCriteria {
+	return cluster.EndpointCriteria{Endpoint: ds.srv.Address()}
 }
 
 func (ds *deliverServer) isFaulty() bool {
@@ -241,7 +258,7 @@ func (ds *deliverServer) stop() {
 
 func (ds *deliverServer) enqueueResponse(seq uint64) {
 	ds.blocks() <- &orderer.DeliverResponse{
-		Type: &orderer.DeliverResponse_Block{Block: common.NewBlock(seq, nil)},
+		Type: &orderer.DeliverResponse_Block{Block: protoutil.NewBlock(seq, nil)},
 	}
 }
 
@@ -278,14 +295,22 @@ func newBlockPuller(dialer *countingDialer, orderers ...string) *cluster.BlockPu
 	return &cluster.BlockPuller{
 		Dialer:              dialer,
 		Channel:             "mychannel",
-		Signer:              &false_crypto.LocalSigner{},
-		Endpoints:           orderers,
-		FetchTimeout:        time.Second,
+		Signer:              &mocks.SignerSerializer{},
+		Endpoints:           endpointCriteriaFromEndpoints(orderers...),
+		FetchTimeout:        time.Second * 10,
 		MaxTotalBufferBytes: 1024 * 1024, // 1MB
 		RetryTimeout:        time.Millisecond * 10,
 		VerifyBlockSequence: noopBlockVerifierf,
 		Logger:              flogging.MustGetLogger("test"),
 	}
+}
+
+func endpointCriteriaFromEndpoints(orderers ...string) []cluster.EndpointCriteria {
+	var res []cluster.EndpointCriteria
+	for _, orderer := range orderers {
+		res = append(res, cluster.EndpointCriteria{Endpoint: orderer})
+	}
+	return res
 }
 
 func TestBlockPullerBasicHappyPath(t *testing.T) {
@@ -367,7 +392,7 @@ func TestBlockPullerHeavyBlocks(t *testing.T) {
 		for seq := start; seq <= end; seq++ {
 			resp := &orderer.DeliverResponse{
 				Type: &orderer.DeliverResponse_Block{
-					Block: common.NewBlock(seq, nil),
+					Block: protoutil.NewBlock(seq, nil),
 				},
 			}
 			data := resp.GetBlock().Data.Data
@@ -570,11 +595,11 @@ func TestBlockPullerFailover(t *testing.T) {
 	defer osn2.stop()
 
 	osn2.addExpectProbeAssert()
-	osn2.addExpectPullAssert(2)
+	osn2.addExpectPullAssert(1)
 	// First response is for the probe
 	osn2.enqueueResponse(3)
-	// Next two responses are for the pulling, while the first block
-	// is skipped because it should've been retrieved from node 1
+	// Next three responses are for the pulling.
+	osn2.enqueueResponse(1)
 	osn2.enqueueResponse(2)
 	osn2.enqueueResponse(3)
 
@@ -592,9 +617,10 @@ func TestBlockPullerFailover(t *testing.T) {
 	// received the first block.
 	var pulledBlock1 sync.WaitGroup
 	pulledBlock1.Add(1)
+	var once sync.Once
 	bp.Logger = bp.Logger.WithOptions(zap.Hooks(func(entry zapcore.Entry) error {
-		if strings.Contains(entry.Message, "Got block 1 of size") {
-			pulledBlock1.Done()
+		if strings.Contains(entry.Message, "Got block [1] of size") {
+			once.Do(pulledBlock1.Done)
 		}
 		return nil
 	}))
@@ -643,12 +669,13 @@ func TestBlockPullerNoneResponsiveOrderer(t *testing.T) {
 	// isn't connected to. This is done by intercepting the appropriate message
 	var waitForConnection sync.WaitGroup
 	waitForConnection.Add(1)
+	var once sync.Once
 	bp.Logger = bp.Logger.WithOptions(zap.Hooks(func(entry zapcore.Entry) error {
-		if !strings.Contains(entry.Message, "Sending request for block 1") {
+		if !strings.Contains(entry.Message, "Sending request for block [1]") {
 			return nil
 		}
-		defer waitForConnection.Done()
-		s := entry.Message[len("Sending request for block 1 to 127.0.0.1:"):]
+		defer once.Do(waitForConnection.Done)
+		s := entry.Message[len("Sending request for block [1] to 127.0.0.1:"):]
 		port, err := strconv.ParseInt(s, 10, 32)
 		assert.NoError(t, err)
 		// If osn2 is the current orderer we're connected to,
@@ -672,8 +699,9 @@ func TestBlockPullerNoneResponsiveOrderer(t *testing.T) {
 		// Enqueue the height int the orderer we're connected to
 		notInUseOrdererNode.enqueueResponse(3)
 		notInUseOrdererNode.addExpectProbeAssert()
-		// Enqueue blocks 2 and 3 to the orderer node we're not connected to.
-		notInUseOrdererNode.addExpectPullAssert(2)
+		// Enqueue blocks 1, 2, 3 to the orderer node we're not connected to.
+		notInUseOrdererNode.addExpectPullAssert(1)
+		notInUseOrdererNode.enqueueResponse(1)
 		notInUseOrdererNode.enqueueResponse(2)
 		notInUseOrdererNode.enqueueResponse(3)
 	}()
@@ -738,14 +766,24 @@ func TestBlockPullerFailures(t *testing.T) {
 		osn.Unlock()
 	}
 
+	badSigErr := errors.New("bad signature")
 	malformBlockSignatureAndRecreateOSNBuffer := func(osn *deliverServer, bp *cluster.BlockPuller) {
 		bp.VerifyBlockSequence = func(_ []*common.Block, _ string) error {
 			close(osn.blocks())
-			osn.setBlocks(make(chan *orderer.DeliverResponse, 100))
-			osn.enqueueResponse(1)
-			osn.enqueueResponse(2)
-			osn.enqueueResponse(3)
-			return errors.New("bad signature")
+			// After failing once, recover and remove the bad signature error.
+			defer func() {
+				// Skip recovery if we already recovered.
+				if badSigErr == nil {
+					return
+				}
+				badSigErr = nil
+				osn.setBlocks(make(chan *orderer.DeliverResponse, 100))
+				osn.enqueueResponse(3)
+				osn.enqueueResponse(1)
+				osn.enqueueResponse(2)
+				osn.enqueueResponse(3)
+			}()
+			return badSigErr
 		}
 	}
 
@@ -799,7 +837,7 @@ func TestBlockPullerFailures(t *testing.T) {
 		},
 		{
 			name:       "failure at pull",
-			logTrigger: "Sending request for block 1",
+			logTrigger: "Sending request for block [1]",
 			beforeFunc: func(osn *deliverServer, bp *cluster.BlockPuller) {
 				// The first seek request asks for the latest block and succeeds
 				osn.addExpectProbeAssert()
@@ -814,7 +852,7 @@ func TestBlockPullerFailures(t *testing.T) {
 		},
 		{
 			name:       "failure at verifying pulled block",
-			logTrigger: "Sending request for block 1",
+			logTrigger: "Sending request for block [1]",
 			beforeFunc: func(osn *deliverServer, bp *cluster.BlockPuller) {
 				// The first seek request asks for the latest block and succeeds
 				osn.addExpectProbeAssert()
@@ -996,7 +1034,7 @@ func TestImpatientStreamFailure(t *testing.T) {
 
 	gt := gomega.NewGomegaWithT(t)
 	gt.Eventually(func() (bool, error) {
-		conn, err = dialer.Dial(osn.srv.Address())
+		conn, err = dialer.Dial(osn.endpointCriteria())
 		return true, err
 	}).Should(gomega.BeTrue())
 	newStream := cluster.NewImpatientStream(conn, time.Millisecond*100)
@@ -1069,7 +1107,7 @@ func TestBlockPullerMaxRetriesExhausted(t *testing.T) {
 	var exhaustedRetryAttemptsLogged bool
 
 	bp.Logger = bp.Logger.WithOptions(zap.Hooks(func(entry zapcore.Entry) error {
-		if entry.Message == "Failed pulling block 3: retry count exhausted(2)" {
+		if entry.Message == "Failed pulling block [3]: retry count exhausted(2)" {
 			exhaustedRetryAttemptsLogged = true
 		}
 		return nil

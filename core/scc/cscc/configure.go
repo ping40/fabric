@@ -22,7 +22,6 @@ import (
 	"github.com/hyperledger/fabric/core/aclmgmt/resources"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 	"github.com/hyperledger/fabric/core/committer/txvalidator/v20/plugindispatcher"
-	"github.com/hyperledger/fabric/core/common/ccprovider"
 	"github.com/hyperledger/fabric/core/common/sysccprovider"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/util"
@@ -31,16 +30,16 @@ import (
 	"github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
 
 // New creates a new instance of the CSCC.
 // Typically, only one will be created per peer instance.
-func New(ccp ccprovider.ChaincodeProvider, sccp sysccprovider.SystemChaincodeProvider,
+func New(sccp sysccprovider.SystemChaincodeProvider,
 	aclProvider aclmgmt.ACLProvider, deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider,
-	lifecycle plugindispatcher.LifecycleResources) *PeerConfiger {
+	lr plugindispatcher.LifecycleResources, nr plugindispatcher.CollectionAndLifecycleResources) *PeerConfiger {
 	return &PeerConfiger{
 		policyChecker: policy.NewPolicyChecker(
 			peer.NewChannelPolicyManagerGetter(),
@@ -48,11 +47,11 @@ func New(ccp ccprovider.ChaincodeProvider, sccp sysccprovider.SystemChaincodePro
 			mgmt.NewLocalMSPPrincipalGetter(),
 		),
 		configMgr:              peer.NewConfigSupport(),
-		ccp:                    ccp,
 		sccp:                   sccp,
 		aclProvider:            aclProvider,
 		deployedCCInfoProvider: deployedCCInfoProvider,
-		lifecycle:              lifecycle,
+		legacyLifecycle:        lr,
+		newLifecycle:           nr,
 	}
 }
 
@@ -70,11 +69,11 @@ func (e *PeerConfiger) Enabled() bool             { return true }
 type PeerConfiger struct {
 	policyChecker          policy.PolicyChecker
 	configMgr              config.Manager
-	ccp                    ccprovider.ChaincodeProvider
 	sccp                   sysccprovider.SystemChaincodeProvider
 	aclProvider            aclmgmt.ACLProvider
 	deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider
-	lifecycle              plugindispatcher.LifecycleResources
+	legacyLifecycle        plugindispatcher.LifecycleResources
+	newLifecycle           plugindispatcher.CollectionAndLifecycleResources
 }
 
 var cnflogger = flogging.MustGetLogger("cscc")
@@ -139,12 +138,12 @@ func (e *PeerConfiger) InvokeNoShim(args [][]byte, sp *pb.SignedProposal) pb.Res
 			return shim.Error("Cannot join the channel <nil> configuration block provided")
 		}
 
-		block, err := utils.GetBlockFromBlockBytes(args[1])
+		block, err := protoutil.GetBlockFromBlockBytes(args[1])
 		if err != nil {
 			return shim.Error(fmt.Sprintf("Failed to reconstruct the genesis block, %s", err))
 		}
 
-		cid, err := utils.GetChainIDFromBlock(block)
+		cid, err := protoutil.GetChainIDFromBlock(block)
 		if err != nil {
 			return shim.Error(fmt.Sprintf("\"JoinChain\" request failed to extract "+
 				"channel id from the block due to [%s]", err))
@@ -170,7 +169,7 @@ func (e *PeerConfiger) InvokeNoShim(args [][]byte, sp *pb.SignedProposal) pb.Res
 			block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txsFilter
 		}
 
-		return joinChain(cid, block, e.ccp, e.sccp, e.deployedCCInfoProvider, e.lifecycle)
+		return joinChain(cid, block, e.sccp, e.deployedCCInfoProvider, e.legacyLifecycle, e.newLifecycle)
 	case GetConfigBlock:
 		// 2. check policy
 		if err = e.aclProvider.CheckACL(resources.Cscc_GetConfigBlock, string(args[1]), sp); err != nil {
@@ -205,13 +204,13 @@ func (e *PeerConfiger) InvokeNoShim(args [][]byte, sp *pb.SignedProposal) pb.Res
 
 // validateConfigBlock validate configuration block to see whenever it's contains valid config transaction
 func validateConfigBlock(block *common.Block) error {
-	envelopeConfig, err := utils.ExtractEnvelope(block, 0)
+	envelopeConfig, err := protoutil.ExtractEnvelope(block, 0)
 	if err != nil {
 		return errors.Errorf("Failed to %s", err)
 	}
 
 	configEnv := &common.ConfigEnvelope{}
-	_, err = utils.UnmarshalEnvelopeOfType(envelopeConfig, common.HeaderType_CONFIG, configEnv)
+	_, err = protoutil.UnmarshalEnvelopeOfType(envelopeConfig, common.HeaderType_CONFIG, configEnv)
 	if err != nil {
 		return errors.Errorf("Bad configuration envelope: %s", err)
 	}
@@ -245,8 +244,8 @@ func validateConfigBlock(block *common.Block) error {
 // joinChain will join the specified chain in the configuration block.
 // Since it is the first block, it is the genesis block containing configuration
 // for this chain, so we want to update the Chain object with this info
-func joinChain(chainID string, block *common.Block, ccp ccprovider.ChaincodeProvider, sccp sysccprovider.SystemChaincodeProvider, deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider, lifecycle plugindispatcher.LifecycleResources) pb.Response {
-	if err := peer.CreateChainFromBlock(block, ccp, sccp, deployedCCInfoProvider, lifecycle); err != nil {
+func joinChain(chainID string, block *common.Block, sccp sysccprovider.SystemChaincodeProvider, deployedCCInfoProvider ledger.DeployedChaincodeInfoProvider, lr plugindispatcher.LifecycleResources, nr plugindispatcher.CollectionAndLifecycleResources) pb.Response {
+	if err := peer.CreateChainFromBlock(block, sccp, deployedCCInfoProvider, lr, nr); err != nil {
 		return shim.Error(err.Error())
 	}
 
@@ -265,7 +264,7 @@ func getConfigBlock(chainID []byte) pb.Response {
 	if block == nil {
 		return shim.Error(fmt.Sprintf("Unknown chain ID, %s", string(chainID)))
 	}
-	blockBytes, err := utils.Marshal(block)
+	blockBytes, err := protoutil.Marshal(block)
 	if err != nil {
 		return shim.Error(err.Error())
 	}
@@ -284,7 +283,7 @@ func (e *PeerConfiger) getConfigTree(chainID []byte) pb.Response {
 		return shim.Error(fmt.Sprintf("Unknown chain ID, %s", string(chainID)))
 	}
 	agCfg := &pb.ConfigTree{ChannelConfig: channelCfg}
-	configBytes, err := utils.Marshal(agCfg)
+	configBytes, err := protoutil.Marshal(agCfg)
 	if err != nil {
 		return shim.Error(err.Error())
 	}

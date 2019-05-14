@@ -67,11 +67,11 @@ var _ = Describe("TokenClient", func() {
 		fakeProverPeerClient = &mock.ProverPeerClient{}
 
 		tokenTx := &token.TokenTransaction{
-			Action: &token.TokenTransaction_PlainAction{
-				PlainAction: &token.PlainTokenAction{
-					Data: &token.PlainTokenAction_PlainImport{
-						PlainImport: &token.PlainImport{
-							Outputs: []*token.PlainOutput{},
+			Action: &token.TokenTransaction_TokenAction{
+				TokenAction: &token.TokenAction{
+					Data: &token.TokenAction_Issue{
+						Issue: &token.Issue{
+							Outputs: []*token.Token{},
 						},
 					},
 				},
@@ -95,24 +95,24 @@ var _ = Describe("TokenClient", func() {
 		prover = &client.ProverPeer{RandomnessReader: fakeRandomnessReader, ProverPeerClient: fakeProverPeerClient, ChannelID: channelID, Time: clock}
 	})
 
-	Describe("RequestImport", func() {
+	Describe("RequestIssue", func() {
 		var (
-			tokensToIssue     []*token.TokenToIssue
+			tokensToIssue     []*token.Token
 			marshalledCommand []byte
 			signedCommand     *token.SignedCommand
 		)
 
 		BeforeEach(func() {
-			tokensToIssue = []*token.TokenToIssue{{
-				Type:      "type",
-				Quantity:  10,
-				Recipient: []byte("alice"),
+			tokensToIssue = []*token.Token{{
+				Type:     "type",
+				Quantity: ToHex(10),
+				Owner:    &token.TokenOwner{Raw: []byte("Alice")},
 			}}
 
 			command := &token.Command{
 				Header: commandHeader,
-				Payload: &token.Command_ImportRequest{
-					ImportRequest: &token.ImportRequest{
+				Payload: &token.Command_IssueRequest{
+					IssueRequest: &token.IssueRequest{
 						TokensToIssue: tokensToIssue,
 					},
 				},
@@ -125,7 +125,7 @@ var _ = Describe("TokenClient", func() {
 		})
 
 		It("returns serialized token transaction", func() {
-			response, err := prover.RequestImport(tokensToIssue, fakeSigningIdentity)
+			response, err := prover.RequestIssue(tokensToIssue, fakeSigningIdentity)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(response).To(Equal(serializedTokenTx))
 
@@ -146,7 +146,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestImport(tokensToIssue, fakeSigningIdentity)
+				_, err := prover.RequestIssue(tokensToIssue, fakeSigningIdentity)
 				Expect(err).To(MatchError("wild-banana"))
 				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(0))
 				Expect(fakeProverPeerClient.CreateProverClientCallCount()).To(Equal(0))
@@ -160,7 +160,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestImport(tokensToIssue, fakeSigningIdentity)
+				_, err := prover.RequestIssue(tokensToIssue, fakeSigningIdentity)
 				Expect(err).To(MatchError("wild-banana"))
 
 				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(0))
@@ -177,7 +177,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestImport(tokensToIssue, fakeSigningIdentity)
+				_, err := prover.RequestIssue(tokensToIssue, fakeSigningIdentity)
 				Expect(err).To(MatchError("wild-banana"))
 				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
 				Expect(fakeProverPeerClient.CreateProverClientCallCount()).To(Equal(1))
@@ -203,7 +203,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestImport(tokensToIssue, fakeSigningIdentity)
+				_, err := prover.RequestIssue(tokensToIssue, fakeSigningIdentity)
 				Expect(err).To(MatchError("error from prover: flying-pineapple"))
 
 				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
@@ -216,7 +216,7 @@ var _ = Describe("TokenClient", func() {
 	Describe("RequestTransfer", func() {
 		var (
 			tokenIDs          []*token.TokenId
-			transferShares    []*token.RecipientTransferShare
+			transferShares    []*token.RecipientShare
 			marshalledCommand []byte
 			signedCommand     *token.SignedCommand
 		)
@@ -227,9 +227,9 @@ var _ = Describe("TokenClient", func() {
 				{TxId: "id1", Index: 0},
 				{TxId: "id2", Index: 0},
 			}
-			transferShares = []*token.RecipientTransferShare{
-				{Recipient: []byte("alice"), Quantity: 100},
-				{Recipient: []byte("Bob"), Quantity: 50},
+			transferShares = []*token.RecipientShare{
+				{Recipient: &token.TokenOwner{Raw: []byte("alice")}, Quantity: ToHex(100)},
+				{Recipient: &token.TokenOwner{Raw: []byte("bob")}, Quantity: ToHex(50)},
 			}
 
 			command := &token.Command{
@@ -359,8 +359,8 @@ var _ = Describe("TokenClient", func() {
 				Header: commandHeader,
 				Payload: &token.Command_RedeemRequest{
 					RedeemRequest: &token.RedeemRequest{
-						TokenIds:         tokenIDs,
-						QuantityToRedeem: quantity,
+						TokenIds: tokenIDs,
+						Quantity: ToHex(quantity),
 					},
 				},
 			}
@@ -372,7 +372,7 @@ var _ = Describe("TokenClient", func() {
 		})
 
 		It("returns serialized token transaction", func() {
-			response, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+			response, err := prover.RequestRedeem(tokenIDs, ToHex(quantity), fakeSigningIdentity)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(response).To(Equal(serializedTokenTx))
 
@@ -392,7 +392,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				_, err := prover.RequestRedeem(tokenIDs, ToHex(quantity), fakeSigningIdentity)
 				Expect(err).To(MatchError("wild-banana"))
 				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
 				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(0))
@@ -406,7 +406,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				_, err := prover.RequestRedeem(tokenIDs, ToHex(quantity), fakeSigningIdentity)
 				Expect(err).To(MatchError("wild-banana"))
 				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(0))
 				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
@@ -422,7 +422,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				_, err := prover.RequestRedeem(tokenIDs, ToHex(quantity), fakeSigningIdentity)
 				Expect(err).To(MatchError("wild-banana"))
 				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
 				Expect(fakeProverClient.ProcessCommandCallCount()).To(Equal(1))
@@ -447,7 +447,7 @@ var _ = Describe("TokenClient", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := prover.RequestRedeem(tokenIDs, quantity, fakeSigningIdentity)
+				_, err := prover.RequestRedeem(tokenIDs, ToHex(quantity), fakeSigningIdentity)
 				Expect(err).To(MatchError("error from prover: flying-pineapple"))
 				Expect(fakeSigningIdentity.SerializeCallCount()).To(Equal(1))
 				Expect(fakeSigningIdentity.SignCallCount()).To(Equal(1))
@@ -460,7 +460,7 @@ var _ = Describe("TokenClient", func() {
 		var (
 			marshalledCommand []byte
 			signedCommand     *token.SignedCommand
-			expectedTokens    []*token.TokenOutput
+			expectedTokens    []*token.UnspentToken
 		)
 		BeforeEach(func() {
 			command := &token.Command{
@@ -476,9 +476,9 @@ var _ = Describe("TokenClient", func() {
 			}
 
 			// prepare SignedCommandResponse for fakeProverClient to return
-			expectedTokens = []*token.TokenOutput{
-				{Id: &token.TokenId{TxId: "idaz", Index: 0}, Type: "typeaz", Quantity: 135},
-				{Id: &token.TokenId{TxId: "idby", Index: 0}, Type: "typeby", Quantity: 79},
+			expectedTokens = []*token.UnspentToken{
+				{Id: &token.TokenId{TxId: "idaz", Index: 0}, Type: "typeaz", Quantity: ToHex(135)},
+				{Id: &token.TokenId{TxId: "idby", Index: 0}, Type: "typeby", Quantity: ToHex(79)},
 			}
 			commandResp := &token.CommandResponse{
 				Payload: &token.CommandResponse_UnspentTokens{
@@ -707,13 +707,13 @@ var _ = Describe("TokenClient", func() {
 
 		BeforeEach(func() {
 			// create a valid payload
-			tokensToIssue := []*token.TokenToIssue{{
-				Type:      "type",
-				Quantity:  10,
-				Recipient: []byte("alice"),
+			tokensToIssue := []*token.Token{{
+				Type:     "type",
+				Quantity: ToHex(10),
+				Owner:    &token.TokenOwner{Raw: []byte("alice")},
 			}}
-			payload = &token.Command_ImportRequest{
-				ImportRequest: &token.ImportRequest{
+			payload = &token.Command_IssueRequest{
+				IssueRequest: &token.IssueRequest{
 					TokensToIssue: tokensToIssue,
 				},
 			}
@@ -721,7 +721,7 @@ var _ = Describe("TokenClient", func() {
 			// create expected SignedCommand
 			marshalledCommand = ProtoMarshal(&token.Command{
 				Header:  commandHeader,
-				Payload: payload.(*token.Command_ImportRequest),
+				Payload: payload.(*token.Command_IssueRequest),
 			})
 			signedCommand = &token.SignedCommand{
 				Command:   marshalledCommand,

@@ -15,16 +15,16 @@ import (
 
 	"github.com/hyperledger/fabric/common/channelconfig"
 	"github.com/hyperledger/fabric/common/configtx"
-	"github.com/hyperledger/fabric/common/crypto"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
 	"github.com/hyperledger/fabric/common/metrics"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
 	"github.com/hyperledger/fabric/orderer/consensus"
 	cb "github.com/hyperledger/fabric/protos/common"
 	ab "github.com/hyperledger/fabric/protos/orderer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -96,7 +96,7 @@ type Registrar struct {
 
 	consenters         map[string]consensus.Consenter
 	ledgerFactory      blockledger.Factory
-	signer             crypto.LocalSigner
+	signer             identity.SignerSerializer
 	blockcutterMetrics *blockcutter.Metrics
 	systemChannelID    string
 	systemChannel      *ChainSupport
@@ -108,7 +108,7 @@ type Registrar struct {
 // Panics on failure.
 func ConfigBlock(reader blockledger.Reader) *cb.Block {
 	lastBlock := blockledger.GetBlock(reader, reader.Height()-1)
-	index, err := utils.GetLastConfigIndexFromBlock(lastBlock)
+	index, err := protoutil.GetLastConfigIndexFromBlock(lastBlock)
 	if err != nil {
 		logger.Panicf("Chain did not have appropriately encoded last config in its latest block: %s", err)
 	}
@@ -121,12 +121,16 @@ func ConfigBlock(reader blockledger.Reader) *cb.Block {
 }
 
 func configTx(reader blockledger.Reader) *cb.Envelope {
-	return utils.ExtractEnvelopeOrPanic(ConfigBlock(reader), 0)
+	return protoutil.ExtractEnvelopeOrPanic(ConfigBlock(reader), 0)
 }
 
 // NewRegistrar produces an instance of a *Registrar.
-func NewRegistrar(ledgerFactory blockledger.Factory,
-	signer crypto.LocalSigner, metricsProvider metrics.Provider, callbacks ...channelconfig.BundleActor) *Registrar {
+func NewRegistrar(
+	ledgerFactory blockledger.Factory,
+	signer identity.SignerSerializer,
+	metricsProvider metrics.Provider,
+	callbacks ...channelconfig.BundleActor,
+) *Registrar {
 	r := &Registrar{
 		chains:             make(map[string]*ChainSupport),
 		ledgerFactory:      ledgerFactory,
@@ -141,6 +145,7 @@ func NewRegistrar(ledgerFactory blockledger.Factory,
 func (r *Registrar) Initialize(consenters map[string]consensus.Consenter) {
 	r.consenters = consenters
 	existingChains := r.ledgerFactory.ChainIDs()
+
 	for _, chainID := range existingChains {
 		rl, err := r.ledgerFactory.GetOrCreate(chainID)
 		if err != nil {
@@ -157,12 +162,14 @@ func (r *Registrar) Initialize(consenters map[string]consensus.Consenter) {
 			if r.systemChannelID != "" {
 				logger.Panicf("There appear to be two system chains %s and %s", r.systemChannelID, chainID)
 			}
+
 			chain := newChainSupport(
 				r,
 				ledgerResources,
 				r.consenters,
 				r.signer,
-				r.blockcutterMetrics)
+				r.blockcutterMetrics,
+			)
 			r.templator = msgprocessor.NewDefaultTemplator(chain)
 			chain.Processor = msgprocessor.NewSystemChannel(chain, r.templator, msgprocessor.CreateSystemChannelFilters(r, chain))
 
@@ -176,7 +183,8 @@ func (r *Registrar) Initialize(consenters map[string]consensus.Consenter) {
 			if status != cb.Status_SUCCESS {
 				logger.Panicf("Error reading genesis block of system channel '%s'", chainID)
 			}
-			logger.Infof("Starting system channel '%s' with genesis block hash %x and orderer type %s", chainID, genesisBlock.Header.Hash(), chain.SharedConfig().ConsensusType())
+			logger.Infof("Starting system channel '%s' with genesis block hash %x and orderer type %s",
+				chainID, protoutil.BlockHeaderHash(genesisBlock.Header), chain.SharedConfig().ConsensusType())
 
 			r.chains[chainID] = chain
 			r.systemChannelID = chainID
@@ -190,7 +198,8 @@ func (r *Registrar) Initialize(consenters map[string]consensus.Consenter) {
 				ledgerResources,
 				r.consenters,
 				r.signer,
-				r.blockcutterMetrics)
+				r.blockcutterMetrics,
+			)
 			r.chains[chainID] = chain
 			chain.start()
 		}
@@ -211,12 +220,13 @@ func (r *Registrar) SystemChannelID() string {
 // and the channel resources for a message or an error if the message is not a message which can
 // be processed directly (like CONFIG and ORDERER_TRANSACTION messages)
 func (r *Registrar) BroadcastChannelSupport(msg *cb.Envelope) (*cb.ChannelHeader, bool, *ChainSupport, error) {
-	chdr, err := utils.ChannelHeader(msg)
+	chdr, err := protoutil.ChannelHeader(msg)
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("could not determine channel ID: %s", err)
 	}
 
 	cs := r.GetChain(chdr.ChannelId)
+	// New channel creation
 	if cs == nil {
 		cs = r.systemChannel
 	}
@@ -233,7 +243,7 @@ func (r *Registrar) BroadcastChannelSupport(msg *cb.Envelope) (*cb.ChannelHeader
 	return chdr, isConfig, cs, nil
 }
 
-// GetChain retrieves the chain support for a chain if it exists
+// GetChain retrieves the chain support for a chain if it exists.
 func (r *Registrar) GetChain(chainID string) *ChainSupport {
 	r.lock.RLock()
 	defer r.lock.RUnlock()
@@ -242,7 +252,7 @@ func (r *Registrar) GetChain(chainID string) *ChainSupport {
 }
 
 func (r *Registrar) newLedgerResources(configTx *cb.Envelope) *ledgerResources {
-	payload, err := utils.UnmarshalPayload(configTx.Payload)
+	payload, err := protoutil.UnmarshalPayload(configTx.Payload)
 	if err != nil {
 		logger.Panicf("Error umarshaling envelope to payload: %s", err)
 	}
@@ -251,7 +261,7 @@ func (r *Registrar) newLedgerResources(configTx *cb.Envelope) *ledgerResources {
 		logger.Panicf("Missing channel header: %s", err)
 	}
 
-	chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 	if err != nil {
 		logger.Panicf("Error unmarshaling channel header: %s", err)
 	}

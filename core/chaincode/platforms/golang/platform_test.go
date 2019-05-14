@@ -19,15 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric/core/chaincode/platforms"
+	"github.com/hyperledger/fabric/core/chaincode/platforms/util"
 	"github.com/hyperledger/fabric/core/config/configtest"
 	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-var _ = platforms.Platform(&Platform{})
 
 func testerr(err error, succ bool) error {
 	if succ && err != nil {
@@ -97,7 +95,7 @@ func TestValidateCDS(t *testing.T) {
 	for _, s := range specs {
 		cds, err := generateFakeCDS(s.CCName, s.Path, s.File, s.Mode)
 
-		err = platform.ValidateCodePackage(cds.Bytes())
+		err = platform.ValidateCodePackage(cds.CodePackage)
 		if s.SuccessExpected == true && err != nil {
 			t.Errorf("Unexpected failure: %s", err)
 		}
@@ -128,12 +126,12 @@ func Test_findSource(t *testing.T) {
 
 	var source SourceMap
 
-	source, err = findSource(gopath, "github.com/hyperledger/fabric/peer")
+	source, err = findSource(gopath, "github.com/hyperledger/fabric/cmd/peer")
 	if err != nil {
 		t.Errorf("failed to find source: %s", err)
 	}
 
-	if _, ok := source["src/github.com/hyperledger/fabric/peer/main.go"]; !ok {
+	if _, ok := source["src/github.com/hyperledger/fabric/cmd/peer/main.go"]; !ok {
 		t.Errorf("Failed to find expected source file: %v", source)
 	}
 
@@ -304,61 +302,16 @@ func TestGetLDFlagsOpts(t *testing.T) {
 	}
 }
 
-//TestGenerateDockerBuild goes through the functions needed to do docker build
-func TestGenerateDockerBuild(t *testing.T) {
-	defaultGopath := os.Getenv("GOPATH")
-	testdataPath, err := filepath.Abs("testdata")
-	require.NoError(t, err)
-
-	tests := []struct {
-		gopath string
-		spec   spec
-	}{
-		{gopath: defaultGopath, spec: spec{CCName: "NoCode", Path: "path/to/nowhere", File: "/bin/warez", Mode: 0100400, SuccessExpected: false}},
-		{gopath: defaultGopath, spec: spec{CCName: "invalidhttp", Path: "https://not/a/valid/path", SuccessExpected: false, RealGen: true}},
-		{gopath: testdataPath, spec: spec{CCName: "noop", Path: "chaincodes/noop", SuccessExpected: true, RealGen: true}},
-		{gopath: testdataPath, spec: spec{CCName: "noopBadPath", Path: "chaincodes/noop", File: "bad/path/to/chaincode.go", Mode: 0100400, SuccessExpected: false}},
-		{gopath: testdataPath, spec: spec{CCName: "noopBadMode", Path: "chaincodes/noop", File: "chaincodes/noop/chaincode.go", Mode: 0100555, SuccessExpected: false}},
-		{gopath: testdataPath, spec: spec{CCName: "AutoVendor", Path: "chaincodes/AutoVendor/chaincode", SuccessExpected: true, RealGen: true}},
-	}
-
+func TestDockerBuildOptions(t *testing.T) {
 	platform := &Platform{}
-	for _, test := range tests {
-		tst := test.spec
-		reset := updateGopath(t, test.gopath)
 
-		inputbuf := bytes.NewBuffer(nil)
-		tw := tar.NewWriter(inputbuf)
+	opts, err := platform.DockerBuildOptions("the-path")
+	assert.NoError(t, err, "unexpected error from DockerBuildOptions")
 
-		var cds *pb.ChaincodeDeploymentSpec
-		var err error
-		if tst.RealGen {
-			cds = &pb.ChaincodeDeploymentSpec{
-				ChaincodeSpec: &pb.ChaincodeSpec{
-					ChaincodeId: &pb.ChaincodeID{
-						Name:    tst.CCName,
-						Path:    tst.Path,
-						Version: "0",
-					},
-				},
-			}
-			cds.CodePackage, err = platform.GetDeploymentPayload(tst.Path)
-			if err = testerr(err, tst.SuccessExpected); err != nil {
-				t.Errorf("test failed in GetDeploymentPayload: %s, %s", cds.ChaincodeSpec.ChaincodeId.Path, err)
-			}
-		} else {
-			cds, err = generateFakeCDS(tst.CCName, tst.Path, tst.File, tst.Mode)
-		}
-
-		if _, err = platform.GenerateDockerfile(); err != nil {
-			t.Errorf("could not generate docker file for a valid spec: %s, %s", cds.ChaincodeSpec.ChaincodeId.Path, err)
-		}
-		err = platform.GenerateDockerBuild(cds.Path(), cds.Bytes(), tw)
-		if err = testerr(err, tst.SuccessExpected); err != nil {
-			t.Errorf("Error validating chaincode spec: %s, %s", cds.ChaincodeSpec.ChaincodeId.Path, err)
-		}
-		reset()
+	expectedOpts := util.DockerBuildOptions{
+		Cmd: "GOPATH=/chaincode/input:$GOPATH go build  -ldflags \"-linkmode external -extldflags '-static'\" -o /chaincode/output/chaincode the-path",
 	}
+	assert.Equal(t, expectedOpts, opts)
 }
 
 func TestMain(m *testing.M) {

@@ -16,6 +16,7 @@ import (
 	"github.com/hyperledger/fabric/msp/mgmt"
 	"github.com/hyperledger/fabric/protos/common"
 	pb "github.com/hyperledger/fabric/protos/peer"
+	"github.com/hyperledger/fabric/protoutil"
 )
 
 const (
@@ -56,6 +57,17 @@ func (d *defaultACLProviderImpl) initialize() {
 
 	d.pResourcePolicyMap = make(map[string]string)
 	d.cResourcePolicyMap = make(map[string]string)
+
+	//-------------- _lifecycle --------------
+	d.pResourcePolicyMap[resources.Lifecycle_InstallChaincode] = mgmt.Admins
+	d.pResourcePolicyMap[resources.Lifecycle_QueryInstalledChaincode] = mgmt.Admins
+	d.pResourcePolicyMap[resources.Lifecycle_QueryInstalledChaincodes] = mgmt.Admins
+	d.pResourcePolicyMap[resources.Lifecycle_ApproveChaincodeDefinitionForMyOrg] = mgmt.Admins
+
+	d.cResourcePolicyMap[resources.Lifecycle_CommitChaincodeDefinition] = CHANNELWRITERS
+	d.cResourcePolicyMap[resources.Lifecycle_QueryChaincodeDefinition] = CHANNELWRITERS
+	d.cResourcePolicyMap[resources.Lifecycle_QueryNamespaceDefinitions] = CHANNELWRITERS
+	d.cResourcePolicyMap[resources.Lifecycle_QueryApprovalStatus] = CHANNELWRITERS
 
 	//-------------- LSCC --------------
 	//p resources (implemented by the chaincode currently)
@@ -104,17 +116,6 @@ func (d *defaultACLProviderImpl) initialize() {
 	d.cResourcePolicyMap[resources.Event_FilteredBlock] = CHANNELREADERS
 }
 
-//this should cover an exhaustive list of everything called from the peer
-func (d *defaultACLProviderImpl) defaultPolicy(resName string, cprovider bool) string {
-	var pol string
-	if cprovider {
-		pol = d.cResourcePolicyMap[resName]
-	} else {
-		pol = d.pResourcePolicyMap[resName]
-	}
-	return pol
-}
-
 func (d *defaultACLProviderImpl) IsPtypePolicy(resName string) bool {
 	_, ok := d.pResourcePolicyMap[resName]
 	return ok
@@ -138,12 +139,12 @@ func (d *defaultACLProviderImpl) CheckACL(resName string, channelID string, idin
 	case *pb.SignedProposal:
 		return d.policyChecker.CheckPolicy(channelID, policy, typedData)
 	case *common.Envelope:
-		sd, err := typedData.AsSignedData()
+		sd, err := protoutil.EnvelopeAsSignedData(typedData)
 		if err != nil {
 			return err
 		}
 		return d.policyChecker.CheckPolicyBySignedData(channelID, policy, sd)
-	case []*common.SignedData:
+	case []*protoutil.SignedData:
 		return d.policyChecker.CheckPolicyBySignedData(channelID, policy, typedData)
 	default:
 		aclLogger.Errorf("Unmapped id on checkACL %s", resName)

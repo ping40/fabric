@@ -9,6 +9,8 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,12 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
+)
+
+const (
+	// MinimumExpirationWarningInterval is the default minimum time interval
+	// between consecutive warnings about certificate expiration.
+	MinimumExpirationWarningInterval = time.Minute * 5
 )
 
 var (
@@ -58,7 +66,7 @@ type RemoteNode struct {
 
 // String returns a string representation of this RemoteNode
 func (rm RemoteNode) String() string {
-	return fmt.Sprintf("ID: %d\nEndpoint: %s\nServerTLSCert:%s ClientTLSCert:%s",
+	return fmt.Sprintf("ID: %d,\nEndpoint: %s,\nServerTLSCert:%s, ClientTLSCert:%s",
 		rm.ID, rm.Endpoint, DERtoPEM(rm.ServerTLSCert), DERtoPEM(rm.ClientTLSCert))
 }
 
@@ -84,15 +92,18 @@ type MembersByChannel map[string]MemberMapping
 
 // Comm implements Communicator
 type Comm struct {
-	shutdownSignal chan struct{}
-	shutdown       bool
-	SendBufferSize int
-	Lock           sync.RWMutex
-	Logger         *flogging.FabricLogger
-	ChanExt        ChannelExtractor
-	H              Handler
-	Connections    *ConnectionStore
-	Chan2Members   MembersByChannel
+	MinimumExpirationWarningInterval time.Duration
+	CertExpWarningThreshold          time.Duration
+	shutdownSignal                   chan struct{}
+	shutdown                         bool
+	SendBufferSize                   int
+	Lock                             sync.RWMutex
+	Logger                           *flogging.FabricLogger
+	ChanExt                          ChannelExtractor
+	H                                Handler
+	Connections                      *ConnectionStore
+	Chan2Members                     MembersByChannel
+	Metrics                          *Metrics
 }
 
 type requestContext struct {
@@ -309,6 +320,13 @@ func (c *Comm) updateStubInMapping(channel string, mapping MemberMapping, node R
 // a stub atomically.
 func (c *Comm) createRemoteContext(stub *Stub, channel string) func() (*RemoteContext, error) {
 	return func() (*RemoteContext, error) {
+		cert, err := x509.ParseCertificate(stub.ServerTLSCert)
+		if err != nil {
+			pemString := string(pem.EncodeToMemory(&pem.Block{Bytes: stub.ServerTLSCert}))
+			c.Logger.Errorf("Invalid DER for channel %s, endpoint %s, ID %d: %v", channel, stub.Endpoint, stub.ID, pemString)
+			return nil, errors.Wrap(err, "invalid certificate DER")
+		}
+
 		c.Logger.Debug("Connecting to", stub.RemoteNode, "for channel", channel)
 
 		conn, err := c.Connections.Connection(stub.Endpoint, stub.ServerTLSCert)
@@ -327,14 +345,24 @@ func (c *Comm) createRemoteContext(stub *Stub, channel string) func() (*RemoteCo
 
 		clusterClient := orderer.NewClusterClient(conn)
 
+		workerCountReporter := workerCountReporter{
+			channel: channel,
+		}
+
 		rc := &RemoteContext{
-			SendBuffSize:   c.SendBufferSize,
-			shutdownSignal: c.shutdownSignal,
-			endpoint:       stub.Endpoint,
-			Logger:         c.Logger,
-			ProbeConn:      probeConnection,
-			conn:           conn,
-			Client:         clusterClient,
+			expiresAt:                        cert.NotAfter,
+			minimumExpirationWarningInterval: c.MinimumExpirationWarningInterval,
+			certExpWarningThreshold:          c.CertExpWarningThreshold,
+			workerCountReporter:              workerCountReporter,
+			Channel:                          channel,
+			Metrics:                          c.Metrics,
+			SendBuffSize:                     c.SendBufferSize,
+			shutdownSignal:                   c.shutdownSignal,
+			endpoint:                         stub.Endpoint,
+			Logger:                           c.Logger,
+			ProbeConn:                        probeConnection,
+			conn:                             conn,
+			Client:                           clusterClient,
 		}
 		return rc, nil
 	}
@@ -410,15 +438,21 @@ func (stub *Stub) Activate(createRemoteContext func() (*RemoteContext, error)) e
 // RemoteContext interacts with remote cluster
 // nodes. Every call can be aborted via call to Abort()
 type RemoteContext struct {
-	SendBuffSize   int
-	shutdownSignal chan struct{}
-	Logger         *flogging.FabricLogger
-	endpoint       string
-	Client         orderer.ClusterClient
-	ProbeConn      func(conn *grpc.ClientConn) error
-	conn           *grpc.ClientConn
-	nextStreamID   uint64
-	streamsByID    sync.Map
+	expiresAt                        time.Time
+	minimumExpirationWarningInterval time.Duration
+	certExpWarningThreshold          time.Duration
+	Metrics                          *Metrics
+	Channel                          string
+	SendBuffSize                     int
+	shutdownSignal                   chan struct{}
+	Logger                           *flogging.FabricLogger
+	endpoint                         string
+	Client                           orderer.ClusterClient
+	ProbeConn                        func(conn *grpc.ClientConn) error
+	conn                             *grpc.ClientConn
+	nextStreamID                     uint64
+	streamsByID                      streamsMapperReporter
+	workerCountReporter              workerCountReporter
 }
 
 // Stream is used to send/receive messages to/from the remote cluster member.
@@ -427,7 +461,9 @@ type Stream struct {
 	sendBuff     chan *orderer.StepRequest
 	commShutdown chan struct{}
 	abortReason  *atomic.Value
+	metrics      *Metrics
 	ID           uint64
+	Channel      string
 	NodeName     string
 	Endpoint     string
 	Logger       *flogging.FabricLogger
@@ -435,6 +471,7 @@ type Stream struct {
 	orderer.Cluster_StepClient
 	Cancel   func(error)
 	canceled *uint32
+	expCheck *certificateExpirationCheck
 }
 
 // StreamOperation denotes an operation done by a stream, such a Send or Receive.
@@ -463,14 +500,22 @@ func (stream *Stream) Send(request *orderer.StepRequest) error {
 // sendOrDrop sends the given request to the remote cluster member, or drops it
 // if it is a consensus request and the queue is full.
 func (stream *Stream) sendOrDrop(request *orderer.StepRequest, allowDrop bool) error {
+	msgType := "transaction"
+	if allowDrop {
+		msgType = "consensus"
+	}
+
+	stream.metrics.reportQueueOccupancy(stream.Endpoint, msgType, stream.Channel, len(stream.sendBuff), cap(stream.sendBuff))
+
 	if allowDrop && len(stream.sendBuff) == cap(stream.sendBuff) {
 		stream.Cancel(errOverflow)
+		stream.metrics.reportMessagesDropped(stream.Endpoint, stream.Channel)
 		return errOverflow
 	}
 
 	select {
 	case <-stream.abortChan:
-		return errors.New("stream aborted")
+		return errors.Errorf("stream %d aborted", stream.ID)
 	case stream.sendBuff <- request:
 		return nil
 	case <-stream.commShutdown:
@@ -495,14 +540,17 @@ func (stream *Stream) sendMessage(request *orderer.StepRequest) {
 	}()
 
 	f := func() (*orderer.StepResponse, error) {
+		startSend := time.Now()
+		stream.expCheck.checkExpiration(startSend, stream.Channel)
 		err := stream.Cluster_StepClient.Send(request)
+		stream.metrics.reportMsgSendTime(stream.Endpoint, stream.Channel, time.Since(startSend))
 		return nil, err
 	}
 
 	_, err = stream.operateWithTimeout(f)
 }
 
-func (stream *Stream) periodicFlushStream() {
+func (stream *Stream) serviceStream() {
 	defer stream.Cancel(errAborted)
 
 	for {
@@ -563,11 +611,11 @@ func (stream *Stream) operateWithTimeout(invoke StreamOperation) (*orderer.StepR
 		}
 		return r.res, r.err
 	case <-timer.C:
+		stream.Logger.Warningf("Stream %d to %s(%s) was forcibly terminated because timeout (%v) expired",
+			stream.ID, stream.NodeName, stream.Endpoint, stream.Timeout)
 		stream.Cancel(errTimeout)
 		// Wait for the operation goroutine to end
 		operationEnded.Wait()
-		stream.Logger.Warningf("Stream %d to %s(%s) was forcibly terminated because timeout (%v) expired",
-			stream.ID, stream.NodeName, stream.Endpoint, stream.Timeout)
 		return nil, errTimeout
 	}
 }
@@ -612,6 +660,7 @@ func (rc *RemoteContext) NewStream(timeout time.Duration) (*Stream, error) {
 	abort := func() {
 		cancel()
 		rc.streamsByID.Delete(streamID)
+		rc.Metrics.reportEgressStreamCount(rc.Channel, atomic.LoadUint32(&rc.streamsByID.size))
 		rc.Logger.Debugf("Stream %d to %s(%s) is aborted", streamID, nodeName, rc.endpoint)
 		atomic.StoreUint32(&canceled, 1)
 		close(abortChan)
@@ -628,6 +677,8 @@ func (rc *RemoteContext) NewStream(timeout time.Duration) (*Stream, error) {
 	stepLogger := logger.WithOptions(zap.AddCallerSkip(1))
 
 	s := &Stream{
+		Channel:            rc.Channel,
+		metrics:            rc.Metrics,
 		abortReason:        abortReason,
 		abortChan:          abortChan,
 		sendBuff:           make(chan *orderer.StepRequest, rc.SendBuffSize),
@@ -642,12 +693,28 @@ func (rc *RemoteContext) NewStream(timeout time.Duration) (*Stream, error) {
 		canceled:           &canceled,
 	}
 
+	s.expCheck = &certificateExpirationCheck{
+		minimumExpirationWarningInterval: rc.minimumExpirationWarningInterval,
+		expirationWarningThreshold:       rc.certExpWarningThreshold,
+		expiresAt:                        rc.expiresAt,
+		endpoint:                         s.Endpoint,
+		nodeName:                         s.NodeName,
+		alert: func(template string, args ...interface{}) {
+			s.Logger.Warningf(template, args...)
+		},
+	}
+
 	rc.Logger.Debugf("Created new stream to %s with ID of %d and buffer size of %d",
 		rc.endpoint, streamID, cap(s.sendBuff))
 
 	rc.streamsByID.Store(streamID, s)
+	rc.Metrics.reportEgressStreamCount(rc.Channel, atomic.LoadUint32(&rc.streamsByID.size))
 
-	go s.periodicFlushStream()
+	go func() {
+		rc.workerCountReporter.increment(s.metrics)
+		s.serviceStream()
+		rc.workerCountReporter.decrement(s.metrics)
+	}()
 
 	return s, nil
 }
@@ -667,4 +734,39 @@ func commonNameFromContext(ctx context.Context) string {
 		return "unidentified node"
 	}
 	return cert.Subject.CommonName
+}
+
+type streamsMapperReporter struct {
+	size uint32
+	sync.Map
+}
+
+func (smr *streamsMapperReporter) Delete(key interface{}) {
+	smr.Map.Delete(key)
+	atomic.AddUint32(&smr.size, ^uint32(0))
+}
+
+func (smr *streamsMapperReporter) Store(key, value interface{}) {
+	smr.Map.Store(key, value)
+	atomic.AddUint32(&smr.size, 1)
+}
+
+type workerCountReporter struct {
+	channel     string
+	workerCount uint32
+}
+
+func (wcr *workerCountReporter) increment(m *Metrics) {
+	count := atomic.AddUint32(&wcr.workerCount, 1)
+	m.reportWorkerCount(wcr.channel, count)
+}
+
+func (wcr *workerCountReporter) decrement(m *Metrics) {
+	// ^0 flips all zeros to ones, which means
+	// 2^32 - 1, and then we add this number wcr.workerCount.
+	// It follows from commutativity of the unsigned integers group
+	// that wcr.workerCount + 2^32 - 1 = wcr.workerCount - 1 + 2^32
+	// which is just wcr.workerCount - 1.
+	count := atomic.AddUint32(&wcr.workerCount, ^uint32(0))
+	m.reportWorkerCount(wcr.channel, count)
 }

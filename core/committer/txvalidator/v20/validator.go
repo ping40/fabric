@@ -16,9 +16,9 @@ import (
 	"github.com/hyperledger/fabric/common/configtx"
 	commonerrors "github.com/hyperledger/fabric/common/errors"
 	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric/common/policies"
 	"github.com/hyperledger/fabric/core/committer/txvalidator/plugin"
 	"github.com/hyperledger/fabric/core/committer/txvalidator/v20/plugindispatcher"
-	"github.com/hyperledger/fabric/core/common/sysccprovider"
 	"github.com/hyperledger/fabric/core/common/validation"
 	"github.com/hyperledger/fabric/core/ledger"
 	ledgerUtil "github.com/hyperledger/fabric/core/ledger/util"
@@ -26,7 +26,7 @@ import (
 	"github.com/hyperledger/fabric/protos/common"
 	mspprotos "github.com/hyperledger/fabric/protos/msp"
 	"github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -78,9 +78,24 @@ type Dispatcher interface {
 //go:generate mockery -dir . -name ChannelResources -case underscore -output mocks/
 //go:generate mockery -dir . -name LedgerResources -case underscore -output mocks/
 //go:generate mockery -dir . -name Dispatcher -case underscore -output mocks/
-//go:generate mockery -dir ../../../ledger/ -name QueryExecutor -case underscore -output mocks/
 
-// implementation of Validator interface, keeps
+//go:generate mockery -dir . -name QueryExecutor -case underscore -output mocks/
+
+// QueryExecutor is the local interface that used to generate mocks for foreign interface.
+type QueryExecutor interface {
+	ledger.QueryExecutor
+}
+
+//go:generate mockery -dir . -name ChannelPolicyManagerGetter -case underscore -output mocks/
+
+// ChannelPolicyManagerGetter is the local interface that used to generate mocks for foreign interface.
+type ChannelPolicyManagerGetter interface {
+	policies.ChannelPolicyManagerGetter
+}
+
+//go:generate mockery -dir plugindispatcher/ -name CollectionResources -case underscore -output mocks/
+
+// TxValidator is the implementation of Validator interface, keeps
 // reference to the ledger to enable tx simulation
 // and execution of plugins
 type TxValidator struct {
@@ -113,17 +128,18 @@ func NewTxValidator(
 	cr ChannelResources,
 	ler LedgerResources,
 	lcr plugindispatcher.LifecycleResources,
-	sccp sysccprovider.SystemChaincodeProvider,
+	cor plugindispatcher.CollectionResources,
 	pm plugin.Mapper,
+	channelPolicyManagerGetter policies.ChannelPolicyManagerGetter,
 ) *TxValidator {
 	// Encapsulates interface implementation
-	pluginValidator := plugindispatcher.NewPluginValidator(pm, ler, &dynamicDeserializer{cr: cr}, &dynamicCapabilities{cr: cr})
+	pluginValidator := plugindispatcher.NewPluginValidator(pm, ler, &dynamicDeserializer{cr: cr}, &dynamicCapabilities{cr: cr}, channelPolicyManagerGetter, cor)
 	return &TxValidator{
 		ChainID:          chainID,
 		Semaphore:        sem,
 		ChannelResources: cr,
 		LedgerResources:  ler,
-		Dispatcher:       plugindispatcher.New(chainID, cr, ler, lcr, sccp, pluginValidator),
+		Dispatcher:       plugindispatcher.New(chainID, cr, ler, lcr, pluginValidator),
 	}
 }
 
@@ -229,7 +245,7 @@ func (v *TxValidator) Validate(block *common.Block) error {
 	}
 
 	// Initialize metadata structure
-	utils.InitBlockMetadata(block)
+	protoutil.InitBlockMetadata(block)
 
 	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txsfltr
 
@@ -282,7 +298,7 @@ func (v *TxValidator) validateTx(req *blockValidationRequest, results chan<- *bl
 		return
 	}
 
-	if env, err := utils.GetEnvelopeFromBlock(d); err != nil {
+	if env, err := protoutil.GetEnvelopeFromBlock(d); err != nil {
 		logger.Warningf("Error getting tx from block: %+v", err)
 		results <- &blockValidationResult{
 			tIdx:           tIdx,
@@ -310,7 +326,7 @@ func (v *TxValidator) validateTx(req *blockValidationRequest, results chan<- *bl
 			return
 		}
 
-		chdr, err := utils.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+		chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
 		if err != nil {
 			logger.Warningf("Could not unmarshal channel header, err %s, skipping", err)
 			results <- &blockValidationResult{
@@ -525,7 +541,8 @@ func (ds *dynamicCapabilities) KeyLevelEndorsement() bool {
 }
 
 func (ds *dynamicCapabilities) MetadataLifecycle() bool {
-	return ds.cr.Capabilities().MetadataLifecycle()
+	// This capability no longer exists and should not be referenced in validation anyway
+	return false
 }
 
 func (ds *dynamicCapabilities) PrivateChannelData() bool {

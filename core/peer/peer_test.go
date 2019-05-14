@@ -8,29 +8,34 @@ package peer
 
 import (
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	configtxtest "github.com/hyperledger/fabric/common/configtx/test"
-	"github.com/hyperledger/fabric/common/localmsp"
 	"github.com/hyperledger/fabric/common/metrics/disabled"
 	mscc "github.com/hyperledger/fabric/common/mocks/scc"
 	"github.com/hyperledger/fabric/core/chaincode/platforms"
 	"github.com/hyperledger/fabric/core/comm"
 	"github.com/hyperledger/fabric/core/committer/txvalidator/plugin"
-	deliverclient "github.com/hyperledger/fabric/core/deliverservice"
+	"github.com/hyperledger/fabric/core/deliverservice"
 	"github.com/hyperledger/fabric/core/deliverservice/blocksprovider"
 	validation "github.com/hyperledger/fabric/core/handlers/validation/api"
+	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/mock"
 	ledgermocks "github.com/hyperledger/fabric/core/ledger/mock"
-	"github.com/hyperledger/fabric/core/mocks/ccprovider"
 	"github.com/hyperledger/fabric/gossip/api"
 	"github.com/hyperledger/fabric/gossip/service"
+	peergossip "github.com/hyperledger/fabric/internal/peer/gossip"
+	"github.com/hyperledger/fabric/internal/peer/gossip/mocks"
 	"github.com/hyperledger/fabric/msp/mgmt"
 	msptesttools "github.com/hyperledger/fabric/msp/mgmt/testtools"
-	peergossip "github.com/hyperledger/fabric/peer/gossip"
-	"github.com/hyperledger/fabric/peer/gossip/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -62,7 +67,7 @@ func (*mockDeliveryClient) Stop() {
 type mockDeliveryClientFactory struct {
 }
 
-func (*mockDeliveryClientFactory) Service(g service.GossipService, endpoints []string, mcs api.MessageCryptoService) (deliverclient.DeliverService, error) {
+func (*mockDeliveryClientFactory) Service(g service.GossipService, endpoints []string, mcs api.MessageCryptoService) (deliverservice.DeliverService, error) {
 	return &mockDeliveryClient{}, nil
 }
 
@@ -85,17 +90,76 @@ func TestInitChain(t *testing.T) {
 }
 
 func TestInitialize(t *testing.T) {
-	cleanup := setupPeerFS(t)
-	defer cleanup()
+	rootFSPath, err := ioutil.TempDir("", "ledgersData")
+	if err != nil {
+		t.Fatalf("Failed to create ledger directory: %s", err)
+	}
+	defer os.RemoveAll(rootFSPath)
 
-	Initialize(nil, &ccprovider.MockCcProviderImpl{}, (&mscc.MocksccProviderFactory{}).NewSystemChaincodeProvider(), plugin.MapBasedMapper(map[string]validation.PluginFactory{}), nil, &ledgermocks.DeployedChaincodeInfoProvider{}, nil, &disabled.Provider{}, nil)
+	Initialize(
+		nil,
+		(&mscc.MocksccProviderFactory{}).NewSystemChaincodeProvider(),
+		plugin.MapBasedMapper(map[string]validation.PluginFactory{}),
+		nil,
+		&ledgermocks.DeployedChaincodeInfoProvider{},
+		nil,
+		&disabled.Provider{},
+		nil,
+		nil,
+		&ledger.Config{
+			RootFSPath: rootFSPath,
+			StateDB: &ledger.StateDB{
+				LevelDBPath: filepath.Join(rootFSPath, "stateleveldb"),
+			},
+			PrivateData: &ledger.PrivateData{
+				StorePath:       filepath.Join(rootFSPath, "pvtdataStore"),
+				MaxBatchSize:    5000,
+				BatchesInterval: 1000,
+				PurgeInterval:   100,
+			},
+			HistoryDB: &ledger.HistoryDB{
+				Enabled: true,
+			},
+		},
+		runtime.NumCPU(),
+	)
 }
 
 func TestCreateChainFromBlock(t *testing.T) {
-	cleanup := setupPeerFS(t)
-	defer cleanup()
+	peerFSPath, err := ioutil.TempDir("", "ledgersData")
+	if err != nil {
+		t.Fatalf("Failed to create peer directory: %s", err)
+	}
+	defer os.RemoveAll(peerFSPath)
+	viper.Set("peer.fileSystemPath", peerFSPath)
 
-	Initialize(nil, &ccprovider.MockCcProviderImpl{}, (&mscc.MocksccProviderFactory{}).NewSystemChaincodeProvider(), plugin.MapBasedMapper(map[string]validation.PluginFactory{}), &platforms.Registry{}, &ledgermocks.DeployedChaincodeInfoProvider{}, nil, &disabled.Provider{}, nil)
+	Initialize(
+		nil,
+		(&mscc.MocksccProviderFactory{}).NewSystemChaincodeProvider(),
+		plugin.MapBasedMapper(map[string]validation.PluginFactory{}),
+		&platforms.Registry{},
+		&ledgermocks.DeployedChaincodeInfoProvider{},
+		nil,
+		&disabled.Provider{},
+		nil,
+		nil,
+		&ledger.Config{
+			RootFSPath: filepath.Join(peerFSPath, "ledgersData"),
+			StateDB: &ledger.StateDB{
+				LevelDBPath: filepath.Join(peerFSPath, "ledgersData", "stateleveldb"),
+			},
+			PrivateData: &ledger.PrivateData{
+				StorePath:       filepath.Join(peerFSPath, "ledgersData", "pvtdataStore"),
+				MaxBatchSize:    5000,
+				BatchesInterval: 1000,
+				PurgeInterval:   100,
+			},
+			HistoryDB: &ledger.HistoryDB{
+				Enabled: true,
+			},
+		},
+		runtime.NumCPU(),
+	)
 	testChainID := fmt.Sprintf("mytestchainid-%d", rand.Int())
 	block, err := configtxtest.MakeGenesisBlock(testChainID)
 	if err != nil {
@@ -110,8 +174,8 @@ func TestCreateChainFromBlock(t *testing.T) {
 
 	msptesttools.LoadMSPSetupForTesting()
 
-	identity, _ := mgmt.GetLocalSigningIdentityOrPanic().Serialize()
-	messageCryptoService := peergossip.NewMCS(&mocks.ChannelPolicyManagerGetter{}, localmsp.NewSigner(), mgmt.NewDeserializersManager())
+	signer := mgmt.GetLocalSigningIdentityOrPanic()
+	messageCryptoService := peergossip.NewMCS(&mocks.ChannelPolicyManagerGetter{}, signer, mgmt.NewDeserializersManager())
 	secAdv := peergossip.NewSecurityAdvisor(mgmt.NewDeserializersManager())
 	var defaultSecureDialOpts = func() []grpc.DialOption {
 		var dialOpts []grpc.DialOption
@@ -119,15 +183,23 @@ func TestCreateChainFromBlock(t *testing.T) {
 		return dialOpts
 	}
 	err = service.InitGossipServiceCustomDeliveryFactory(
-		identity, &disabled.Provider{}, socket.Addr().String(), grpcServer, nil, &mockDeliveryClientFactory{},
-		messageCryptoService, secAdv, defaultSecureDialOpts)
+		signer,
+		&disabled.Provider{},
+		socket.Addr().String(),
+		grpcServer,
+		nil,
+		&mockDeliveryClientFactory{},
+		messageCryptoService,
+		secAdv,
+		defaultSecureDialOpts,
+	)
 
 	assert.NoError(t, err)
 
 	go grpcServer.Serve(socket)
 	defer grpcServer.Stop()
 
-	err = CreateChainFromBlock(block, nil, nil, &mock.DeployedChaincodeInfoProvider{}, nil)
+	err = CreateChainFromBlock(block, nil, &mock.DeployedChaincodeInfoProvider{}, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to create chain %s", err)
 	}
@@ -200,7 +272,8 @@ func TestCreateChainFromBlock(t *testing.T) {
 }
 
 func TestGetLocalIP(t *testing.T) {
-	ip := GetLocalIP()
+	ip, err := GetLocalIP()
+	assert.NoError(t, err)
 	t.Log(ip)
 }
 

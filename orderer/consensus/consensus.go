@@ -8,10 +8,11 @@ package consensus
 
 import (
 	"github.com/hyperledger/fabric/common/channelconfig"
-	"github.com/hyperledger/fabric/common/crypto"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
 	cb "github.com/hyperledger/fabric/protos/common"
+	"github.com/hyperledger/fabric/protoutil"
 )
 
 // Consenter defines the backing ordering mechanism.
@@ -71,18 +72,21 @@ type Chain interface {
 
 // ConsenterSupport provides the resources available to a Consenter implementation.
 type ConsenterSupport interface {
-	crypto.LocalSigner
+	identity.SignerSerializer
 	msgprocessor.Processor
 
 	// VerifyBlockSignature verifies a signature of a block with a given optional
 	// configuration (can be nil).
-	VerifyBlockSignature([]*cb.SignedData, *cb.ConfigEnvelope) error
+	VerifyBlockSignature([]*protoutil.SignedData, *cb.ConfigEnvelope) error
 
 	// BlockCutter returns the block cutting helper for this channel.
 	BlockCutter() blockcutter.Receiver
 
 	// SharedConfig provides the shared config from the channel's current config block.
 	SharedConfig() channelconfig.Orderer
+
+	// ChannelConfig provides the channel config from the channel's current config block.
+	ChannelConfig() channelconfig.Channel
 
 	// CreateNextBlock takes a list of messages and creates the next block based on the block with highest block number committed to the ledger
 	// Note that either WriteBlock or WriteConfigBlock must be called before invoking this method a second time.
@@ -106,4 +110,11 @@ type ConsenterSupport interface {
 
 	// Height returns the number of blocks in the chain this channel is associated with.
 	Height() uint64
+
+	// Append appends a new block to the ledger in its raw form,
+	// unlike WriteBlock that also mutates its metadata.
+	Append(block *cb.Block) error
+
+	// DetectConsensusMigration identifies restart after consensus-type migration.
+	DetectConsensusMigration() bool
 }

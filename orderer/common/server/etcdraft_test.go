@@ -36,7 +36,7 @@ func TestSpawnEtcdRaft(t *testing.T) {
 	gt.Expect(err).NotTo(HaveOccurred())
 
 	// Build the configtxgen binary
-	configtxgen, err := gexec.Build("github.com/hyperledger/fabric/common/tools/configtxgen")
+	configtxgen, err := gexec.Build("github.com/hyperledger/fabric/cmd/configtxgen")
 	gt.Expect(err).NotTo(HaveOccurred())
 
 	// Build the orderer binary
@@ -45,8 +45,12 @@ func TestSpawnEtcdRaft(t *testing.T) {
 
 	defer gexec.CleanupBuildArtifacts()
 
-	t.Run("EtcdRaft launch failure", func(t *testing.T) {
-		testEtcdRaftOSNFailure(gt, tempDir, orderer, fabricRootDir)
+	t.Run("Invalid bootstrap block", func(t *testing.T) {
+		testEtcdRaftOSNFailureInvalidBootstrapBlock(gt, tempDir, orderer, fabricRootDir)
+	})
+
+	t.Run("No TLS", func(t *testing.T) {
+		testEtcdRaftOSNNoTLS(gt, tempDir, orderer, fabricRootDir, configtxgen)
 	})
 
 	t.Run("EtcdRaft launch success", func(t *testing.T) {
@@ -54,7 +58,7 @@ func TestSpawnEtcdRaft(t *testing.T) {
 	})
 }
 
-func testEtcdRaftOSNSuccess(gt *GomegaWithT, tempDir, configtxgen, cwd, orderer, fabricRootDir string) {
+func createBootstrapBlock(gt *GomegaWithT, tempDir, configtxgen, cwd string) string {
 	// Create the genesis block for the system channel
 	genesisBlockPath := filepath.Join(tempDir, "genesis.block")
 	cmd := exec.Command(configtxgen, "-channelID", "system", "-profile", "SampleDevModeEtcdRaft",
@@ -62,23 +66,40 @@ func testEtcdRaftOSNSuccess(gt *GomegaWithT, tempDir, configtxgen, cwd, orderer,
 	cmd.Env = append(cmd.Env, fmt.Sprintf("FABRIC_CFG_PATH=%s", filepath.Join(cwd, "testdata")))
 	configtxgenProcess, err := gexec.Start(cmd, nil, nil)
 	gt.Expect(err).NotTo(HaveOccurred())
-
 	gt.Eventually(configtxgenProcess, time.Minute).Should(gexec.Exit(0))
 	gt.Expect(configtxgenProcess.Err).To(gbytes.Say("Writing genesis block"))
+
+	return genesisBlockPath
+}
+
+func testEtcdRaftOSNSuccess(gt *GomegaWithT, tempDir, configtxgen, cwd, orderer, fabricRootDir string) {
+	genesisBlockPath := createBootstrapBlock(gt, tempDir, configtxgen, cwd)
 
 	// Launch the OSN
 	ordererProcess := launchOrderer(gt, orderer, tempDir, genesisBlockPath, fabricRootDir)
 	defer ordererProcess.Kill()
-	// General.Cluster.ReplicationMaxRetries is not specified in the orderer.yaml, so let's ensure
-	// it is really configured autonomously via the localconfig code.
+	// The following configuration parameters are not specified in the orderer.yaml, so let's ensure
+	// they are really configured autonomously via the localconfig code.
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.DialTimeout = 5s"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.RPCTimeout = 7s"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.ReplicationBufferSize = 20971520"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.ReplicationPullTimeout = 5s"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.ReplicationRetryTimeout = 5s"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.ReplicationBackgroundRefreshInterval = 5m0s"))
 	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.ReplicationMaxRetries = 12"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.SendBufferSize = 10"))
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("General.Cluster.CertExpirationWarningThreshold = 168h0m0s"))
+
+	// Consensus.EvictionSuspicion is not specified in orderer.yaml, so let's ensure
+	// it is really configured autonomously via the etcdraft chain itself.
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("EvictionSuspicion not set, defaulting to 10m"))
 	// Wait until the the node starts up and elects itself as a single leader in a single node cluster.
 	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("Starting cluster listener on 127.0.0.1:5612"))
 	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("Beginning to serve requests"))
 	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say("becomeLeader"))
 }
 
-func testEtcdRaftOSNFailure(gt *GomegaWithT, tempDir, orderer, fabricRootDir string) {
+func testEtcdRaftOSNFailureInvalidBootstrapBlock(gt *GomegaWithT, tempDir, orderer, fabricRootDir string) {
 	// Grab an application channel genesis block
 	genesisBlockPath := filepath.Join(filepath.Join("testdata", "mychannel.block"))
 	genesisBlockBytes, err := ioutil.ReadFile(genesisBlockPath)
@@ -94,6 +115,29 @@ func testEtcdRaftOSNFailure(gt *GomegaWithT, tempDir, orderer, fabricRootDir str
 	defer ordererProcess.Kill()
 
 	expectedErr := "Failed validating bootstrap block: the block isn't a system channel block because it lacks ConsortiumsConfig"
+	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say(expectedErr))
+}
+
+func testEtcdRaftOSNNoTLS(gt *GomegaWithT, tempDir, orderer, fabricRootDir string, configtxgen string) {
+	cwd, err := filepath.Abs(".")
+	gt.Expect(err).NotTo(HaveOccurred())
+
+	genesisBlockPath := createBootstrapBlock(gt, tempDir, configtxgen, cwd)
+
+	cmd := exec.Command(orderer)
+	cmd.Env = []string{
+		"ORDERER_GENERAL_LISTENPORT=5611",
+		"ORDERER_GENERAL_GENESISMETHOD=file",
+		"ORDERER_GENERAL_SYSTEMCHANNEL=system",
+		fmt.Sprintf("ORDERER_FILELEDGER_LOCATION=%s", filepath.Join(tempDir, "ledger")),
+		fmt.Sprintf("ORDERER_GENERAL_GENESISFILE=%s", genesisBlockPath),
+		fmt.Sprintf("FABRIC_CFG_PATH=%s", filepath.Join(fabricRootDir, "sampleconfig")),
+	}
+	ordererProcess, err := gexec.Start(cmd, nil, nil)
+	gt.Expect(err).NotTo(HaveOccurred())
+	defer ordererProcess.Kill()
+
+	expectedErr := "TLS is required for running ordering nodes of type etcdraft."
 	gt.Eventually(ordererProcess.Err, time.Minute).Should(gbytes.Say(expectedErr))
 }
 

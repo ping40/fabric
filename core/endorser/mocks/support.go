@@ -53,17 +53,18 @@ type Support struct {
 		result1 *peer.ProposalResponse
 		result2 error
 	}
-	ExecuteStub        func(*ccprovider.TransactionParams, string, string, string, string, *peer.SignedProposal, *peer.Proposal, *peer.ChaincodeInput) (*peer.Response, *peer.ChaincodeEvent, error)
+	ExecuteStub        func(*ccprovider.TransactionParams, string, string, string, []byte, bool, *peer.SignedProposal, *peer.Proposal, *peer.ChaincodeInput) (*peer.Response, *peer.ChaincodeEvent, error)
 	executeMutex       sync.RWMutex
 	executeArgsForCall []struct {
 		arg1 *ccprovider.TransactionParams
 		arg2 string
 		arg3 string
 		arg4 string
-		arg5 string
-		arg6 *peer.SignedProposal
-		arg7 *peer.Proposal
-		arg8 *peer.ChaincodeInput
+		arg5 []byte
+		arg6 bool
+		arg7 *peer.SignedProposal
+		arg8 *peer.Proposal
+		arg9 *peer.ChaincodeInput
 	}
 	executeReturns struct {
 		result1 *peer.Response
@@ -110,11 +111,12 @@ type Support struct {
 		result1 channelconfig.Application
 		result2 bool
 	}
-	GetChaincodeDefinitionStub        func(string, ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error)
+	GetChaincodeDefinitionStub        func(string, string, ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error)
 	getChaincodeDefinitionMutex       sync.RWMutex
 	getChaincodeDefinitionArgsForCall []struct {
 		arg1 string
-		arg2 ledger.QueryExecutor
+		arg2 string
+		arg3 ledger.QueryExecutor
 	}
 	getChaincodeDefinitionReturns struct {
 		result1 ccprovider.ChaincodeDefinition
@@ -466,7 +468,12 @@ func (fake *Support) EndorseWithPluginReturnsOnCall(i int, result1 *peer.Proposa
 	}{result1, result2}
 }
 
-func (fake *Support) Execute(arg1 *ccprovider.TransactionParams, arg2 string, arg3 string, arg4 string, arg5 string, arg6 *peer.SignedProposal, arg7 *peer.Proposal, arg8 *peer.ChaincodeInput) (*peer.Response, *peer.ChaincodeEvent, error) {
+func (fake *Support) Execute(arg1 *ccprovider.TransactionParams, arg2 string, arg3 string, arg4 string, arg5 []byte, arg6 bool, arg7 *peer.SignedProposal, arg8 *peer.Proposal, arg9 *peer.ChaincodeInput) (*peer.Response, *peer.ChaincodeEvent, error) {
+	var arg5Copy []byte
+	if arg5 != nil {
+		arg5Copy = make([]byte, len(arg5))
+		copy(arg5Copy, arg5)
+	}
 	fake.executeMutex.Lock()
 	ret, specificReturn := fake.executeReturnsOnCall[len(fake.executeArgsForCall)]
 	fake.executeArgsForCall = append(fake.executeArgsForCall, struct {
@@ -474,15 +481,16 @@ func (fake *Support) Execute(arg1 *ccprovider.TransactionParams, arg2 string, ar
 		arg2 string
 		arg3 string
 		arg4 string
-		arg5 string
-		arg6 *peer.SignedProposal
-		arg7 *peer.Proposal
-		arg8 *peer.ChaincodeInput
-	}{arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8})
-	fake.recordInvocation("Execute", []interface{}{arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8})
+		arg5 []byte
+		arg6 bool
+		arg7 *peer.SignedProposal
+		arg8 *peer.Proposal
+		arg9 *peer.ChaincodeInput
+	}{arg1, arg2, arg3, arg4, arg5Copy, arg6, arg7, arg8, arg9})
+	fake.recordInvocation("Execute", []interface{}{arg1, arg2, arg3, arg4, arg5Copy, arg6, arg7, arg8, arg9})
 	fake.executeMutex.Unlock()
 	if fake.ExecuteStub != nil {
-		return fake.ExecuteStub(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+		return fake.ExecuteStub(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2, ret.result3
@@ -497,17 +505,17 @@ func (fake *Support) ExecuteCallCount() int {
 	return len(fake.executeArgsForCall)
 }
 
-func (fake *Support) ExecuteCalls(stub func(*ccprovider.TransactionParams, string, string, string, string, *peer.SignedProposal, *peer.Proposal, *peer.ChaincodeInput) (*peer.Response, *peer.ChaincodeEvent, error)) {
+func (fake *Support) ExecuteCalls(stub func(*ccprovider.TransactionParams, string, string, string, []byte, bool, *peer.SignedProposal, *peer.Proposal, *peer.ChaincodeInput) (*peer.Response, *peer.ChaincodeEvent, error)) {
 	fake.executeMutex.Lock()
 	defer fake.executeMutex.Unlock()
 	fake.ExecuteStub = stub
 }
 
-func (fake *Support) ExecuteArgsForCall(i int) (*ccprovider.TransactionParams, string, string, string, string, *peer.SignedProposal, *peer.Proposal, *peer.ChaincodeInput) {
+func (fake *Support) ExecuteArgsForCall(i int) (*ccprovider.TransactionParams, string, string, string, []byte, bool, *peer.SignedProposal, *peer.Proposal, *peer.ChaincodeInput) {
 	fake.executeMutex.RLock()
 	defer fake.executeMutex.RUnlock()
 	argsForCall := fake.executeArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6, argsForCall.arg7, argsForCall.arg8
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6, argsForCall.arg7, argsForCall.arg8, argsForCall.arg9
 }
 
 func (fake *Support) ExecuteReturns(result1 *peer.Response, result2 *peer.ChaincodeEvent, result3 error) {
@@ -675,17 +683,18 @@ func (fake *Support) GetApplicationConfigReturnsOnCall(i int, result1 channelcon
 	}{result1, result2}
 }
 
-func (fake *Support) GetChaincodeDefinition(arg1 string, arg2 ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error) {
+func (fake *Support) GetChaincodeDefinition(arg1 string, arg2 string, arg3 ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error) {
 	fake.getChaincodeDefinitionMutex.Lock()
 	ret, specificReturn := fake.getChaincodeDefinitionReturnsOnCall[len(fake.getChaincodeDefinitionArgsForCall)]
 	fake.getChaincodeDefinitionArgsForCall = append(fake.getChaincodeDefinitionArgsForCall, struct {
 		arg1 string
-		arg2 ledger.QueryExecutor
-	}{arg1, arg2})
-	fake.recordInvocation("GetChaincodeDefinition", []interface{}{arg1, arg2})
+		arg2 string
+		arg3 ledger.QueryExecutor
+	}{arg1, arg2, arg3})
+	fake.recordInvocation("GetChaincodeDefinition", []interface{}{arg1, arg2, arg3})
 	fake.getChaincodeDefinitionMutex.Unlock()
 	if fake.GetChaincodeDefinitionStub != nil {
-		return fake.GetChaincodeDefinitionStub(arg1, arg2)
+		return fake.GetChaincodeDefinitionStub(arg1, arg2, arg3)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
@@ -700,17 +709,17 @@ func (fake *Support) GetChaincodeDefinitionCallCount() int {
 	return len(fake.getChaincodeDefinitionArgsForCall)
 }
 
-func (fake *Support) GetChaincodeDefinitionCalls(stub func(string, ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error)) {
+func (fake *Support) GetChaincodeDefinitionCalls(stub func(string, string, ledger.QueryExecutor) (ccprovider.ChaincodeDefinition, error)) {
 	fake.getChaincodeDefinitionMutex.Lock()
 	defer fake.getChaincodeDefinitionMutex.Unlock()
 	fake.GetChaincodeDefinitionStub = stub
 }
 
-func (fake *Support) GetChaincodeDefinitionArgsForCall(i int) (string, ledger.QueryExecutor) {
+func (fake *Support) GetChaincodeDefinitionArgsForCall(i int) (string, string, ledger.QueryExecutor) {
 	fake.getChaincodeDefinitionMutex.RLock()
 	defer fake.getChaincodeDefinitionMutex.RUnlock()
 	argsForCall := fake.getChaincodeDefinitionArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
 }
 
 func (fake *Support) GetChaincodeDefinitionReturns(result1 ccprovider.ChaincodeDefinition, result2 error) {

@@ -7,21 +7,26 @@ SPDX-License-Identifier: Apache-2.0
 package etcdraft
 
 import (
+	"context"
+	"crypto/sha256"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"code.cloudfoundry.org/clock"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
+	"github.com/gogo/protobuf/proto"
 	"github.com/hyperledger/fabric/common/flogging"
 	"github.com/hyperledger/fabric/protos/orderer"
 	"github.com/hyperledger/fabric/protos/orderer/etcdraft"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
 )
 
 type node struct {
 	chainID string
 	logger  *flogging.FabricLogger
+	metrics *Metrics
 
 	unreachableLock sync.RWMutex
 	unreachable     map[uint64]struct{}
@@ -36,20 +41,30 @@ type node struct {
 	tickInterval time.Duration
 	clock        clock.Clock
 
-	metadata *etcdraft.RaftMetadata
+	metadata *etcdraft.BlockMetadata
 
 	raft.Node
 }
 
 func (n *node) start(fresh, join bool) {
-	raftPeers := RaftPeers(n.metadata.Consenters)
+	raftPeers := RaftPeers(n.metadata.ConsenterIds)
+	n.logger.Debugf("Starting raft node: #peers: %v", len(raftPeers))
 
+	var campaign bool
 	if fresh {
 		if join {
 			raftPeers = nil
 			n.logger.Info("Starting raft node to join an existing channel")
 		} else {
 			n.logger.Info("Starting raft node as part of a new channel")
+
+			// determine the node to start campaign by selecting the node with ID equals to:
+			//                hash(channelID) % cluster_size + 1
+			sha := sha256.Sum256([]byte(n.chainID))
+			number, _ := proto.DecodeVarint(sha[24:])
+			if n.config.ID == number%uint64(len(raftPeers))+1 {
+				campaign = true
+			}
 		}
 		n.Node = raft.StartNode(n.config, raftPeers)
 	} else {
@@ -57,31 +72,75 @@ func (n *node) start(fresh, join bool) {
 		n.Node = raft.RestartNode(n.config)
 	}
 
-	go n.run()
+	go n.run(campaign)
 }
 
-func (n *node) run() {
-	ticker := n.clock.NewTicker(n.tickInterval)
+func (n *node) run(campaign bool) {
+	raftTicker := n.clock.NewTicker(n.tickInterval)
 
 	if s := n.storage.Snapshot(); !raft.IsEmptySnap(s) {
 		n.chain.snapC <- &s
 	}
 
+	elected := make(chan struct{})
+	if campaign {
+		n.logger.Infof("This node is picked to start campaign")
+		go func() {
+			// Attempt campaign every two HeartbeatTimeout elapses, until leader is present - either this
+			// node successfully claims leadership, or another leader already existed when this node starts.
+			// We could do this more lazily and exit proactive campaign once transitioned to Candidate state
+			// (not PreCandidate because other nodes might not have started yet, in which case PreVote
+			// messages are dropped at recipients). But there is no obvious reason (for now) to be lazy.
+			//
+			// 2*HeartbeatTick is used to avoid excessive campaign when network latency is significant and
+			// Raft term keeps advancing in this extreme case.
+			campaignTicker := n.clock.NewTicker(n.tickInterval * time.Duration(n.config.HeartbeatTick) * 2)
+			defer campaignTicker.Stop()
+
+			for {
+				select {
+				case <-campaignTicker.C():
+					n.Campaign(context.TODO())
+				case <-elected:
+					return
+				case <-n.chain.doneC:
+					return
+				}
+			}
+		}()
+	}
+
 	for {
 		select {
-		case <-ticker.C():
+		case <-raftTicker.C():
 			n.Tick()
 
 		case rd := <-n.Ready():
+			startStoring := n.clock.Now()
 			if err := n.storage.Store(rd.Entries, rd.HardState, rd.Snapshot); err != nil {
 				n.logger.Panicf("Failed to persist etcd/raft data: %s", err)
 			}
+			duration := n.clock.Since(startStoring).Seconds()
+			n.metrics.DataPersistDuration.Observe(float64(duration))
 
 			if !raft.IsEmptySnap(rd.Snapshot) {
 				n.chain.snapC <- &rd.Snapshot
 			}
 
-			n.chain.applyC <- apply{rd.CommittedEntries, rd.SoftState}
+			// skip empty apply
+			if len(rd.CommittedEntries) != 0 || rd.SoftState != nil {
+				n.chain.applyC <- apply{rd.CommittedEntries, rd.SoftState}
+			}
+
+			if campaign && rd.SoftState != nil {
+				leader := atomic.LoadUint64(&rd.SoftState.Lead) // etcdraft requires atomic access to this var
+				if leader != raft.None {
+					n.logger.Infof("Leader %d is present, quit campaign", leader)
+					campaign = false
+					close(elected)
+				}
+			}
+
 			n.Advance()
 
 			// TODO(jay_guo) leader can write to disk in parallel with replicating
@@ -89,7 +148,7 @@ func (n *node) run() {
 			n.send(rd.Messages)
 
 		case <-n.chain.haltC:
-			ticker.Stop()
+			raftTicker.Stop()
 			n.Stop()
 			n.storage.Close()
 			n.logger.Infof("Raft node stopped")
@@ -110,10 +169,10 @@ func (n *node) send(msgs []raftpb.Message) {
 
 		status := raft.SnapshotFinish
 
-		msgBytes := utils.MarshalOrPanic(&msg)
+		msgBytes := protoutil.MarshalOrPanic(&msg)
 		err := n.rpc.SendConsensus(msg.To, &orderer.ConsensusRequest{Channel: n.chainID, Payload: msgBytes})
 		if err != nil {
-			// TODO We should call ReportUnreachable if message delivery fails
+			n.ReportUnreachable(msg.To)
 			n.logSendFailure(msg.To, err)
 
 			status = raft.SnapshotFailure
@@ -126,6 +185,62 @@ func (n *node) send(msgs []raftpb.Message) {
 			n.ReportSnapshot(msg.To, status)
 		}
 	}
+}
+
+// If this is called on leader, it picks a node that is
+// recently active, and attempt to transfer leadership to it.
+// If this is called on follower, it simply waits for a
+// leader change till timeout (ElectionTimeout).
+func (n *node) abdicateLeader(currentLead uint64) {
+	status := n.Status()
+
+	if status.Lead != raft.None && status.Lead != currentLead {
+		n.logger.Warn("Leader has changed since asked to transfer leadership")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.TODO(), time.Duration(n.config.ElectionTick)*n.tickInterval)
+	defer cancel()
+
+	// Leader initiates leader transfer
+	if status.RaftState == raft.StateLeader {
+		var transferee uint64
+		for id, pr := range status.Progress {
+			if id == status.ID {
+				continue // skip self
+			}
+
+			if pr.RecentActive && !pr.Paused {
+				transferee = id
+				break
+			}
+
+			n.logger.Debugf("Node %d is not qualified as transferee because it's either paused or not active", id)
+		}
+
+		if transferee == raft.None {
+			n.logger.Errorf("No follower is qualified as transferee, abort leader transfer")
+			return
+		}
+
+		n.logger.Infof("Transferring leadership to %d", transferee)
+		n.TransferLeadership(ctx, status.ID, transferee)
+	}
+
+	// Periodically check leader has changed till ElectionTimeout elapsed
+	var newLeader uint64
+	for newLeader = n.Status().Lead; newLeader == status.Lead || newLeader == raft.None; newLeader = n.Status().Lead {
+		select {
+		case <-ctx.Done():
+			n.logger.Warn("Leader transfer timeout")
+			return
+		case <-time.After(n.tickInterval):
+		case <-n.chain.doneC:
+			return
+		}
+	}
+
+	n.logger.Infof("Leader has been transferred from %d to %d", currentLead, newLeader)
 }
 
 func (n *node) logSendFailure(dest uint64, err error) {

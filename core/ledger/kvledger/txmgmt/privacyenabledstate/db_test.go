@@ -8,7 +8,6 @@ package privacyenabledstate
 
 import (
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/hyperledger/fabric/common/ledger/testutil"
@@ -18,16 +17,8 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/kvledger/txmgmt/version"
 	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/hyperledger/fabric/protos/common"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
-
-func TestMain(m *testing.M) {
-	viper.Set("peer.fileSystemPath", "/tmp/fabric/ledgertests/kvledger/txmgmt/privacyenabledstate")
-	// Disable auto warm to avoid error logs when the couchdb database has been dropped
-	viper.Set("ledger.state.couchDBConfig.autoWarmIndexes", false)
-	os.Exit(m.Run())
-}
 
 func TestBatch(t *testing.T) {
 	batch := UpdateMap(make(map[string]nsBatch))
@@ -107,6 +98,10 @@ func testDB(t *testing.T, env TestEnv) {
 	vv, err = db.GetPrivateData("ns1", "coll1", "key1")
 	assert.NoError(t, err)
 	assert.Equal(t, &statedb.VersionedValue{Value: []byte("pvt_value1"), Version: version.NewHeight(1, 4)}, vv)
+
+	vv, err = db.GetPrivateDataHash("ns1", "coll1", "key1")
+	assert.NoError(t, err)
+	assert.Equal(t, &statedb.VersionedValue{Value: util.ComputeStringHash("pvt_value1"), Version: version.NewHeight(1, 4)}, vv)
 
 	vv, err = db.GetValueHash("ns1", "coll1", util.ComputeStringHash("key1"))
 	assert.NoError(t, err)

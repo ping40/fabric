@@ -19,9 +19,11 @@ import (
 	gossip2 "github.com/hyperledger/fabric/gossip/gossip"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	"github.com/hyperledger/fabric/gossip/metrics/mocks"
+	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/protos/common"
 	proto "github.com/hyperledger/fabric/protos/gossip"
 	"github.com/hyperledger/fabric/protos/transientstore"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -92,7 +94,7 @@ func (g *gossipMock) PeersOfChannel(chainID gcommon.ChainID) []discovery.Network
 	return g.Called(chainID).Get(0).([]discovery.NetworkMember)
 }
 
-func (g *gossipMock) SendByCriteria(message *proto.SignedGossipMessage, criteria gossip2.SendCriteria) error {
+func (g *gossipMock) SendByCriteria(message *protoext.SignedGossipMessage, criteria gossip2.SendCriteria) error {
 	args := g.Called(message, criteria)
 	if args.Get(0) != nil {
 		return args.Get(0).(error)
@@ -142,7 +144,7 @@ func TestDistributor(t *testing.T) {
 	})
 
 	g.On("SendByCriteria", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		msg := args.Get(0).(*proto.SignedGossipMessage)
+		msg := args.Get(0).(*protoext.SignedGossipMessage)
 		sendCriteria := args.Get(1).(gossip2.SendCriteria)
 		sendings <- struct {
 			*proto.PrivatePayload
@@ -174,7 +176,7 @@ func TestDistributor(t *testing.T) {
 	}
 
 	policyMock := &collectionAccessPolicyMock{}
-	policyMock.Setup(1, 2, func(_ common.SignedData) bool {
+	policyMock.Setup(1, 2, func(_ protoutil.SignedData) bool {
 		return true
 	}, []string{"org1", "org2"}, false)
 
@@ -184,7 +186,7 @@ func TestDistributor(t *testing.T) {
 	testMetricProvider := mocks.TestUtilConstructMetricProvider()
 	metrics := metrics.NewGossipMetrics(testMetricProvider.FakeProvider).PrivdataMetrics
 
-	d := NewDistributor(channelID, g, accessFactoryMock, metrics)
+	d := NewDistributor(channelID, g, accessFactoryMock, metrics, 0)
 	pdFactory := &pvtDataFactory{}
 	pvtData := pdFactory.addRWSet().addNSRWSet("ns1", "c1", "c2").addRWSet().addNSRWSet("ns2", "c1", "c2").create()
 	err := d.Distribute("tx1", &transientstore.TxPvtReadWriteSetWithConfigInfo{

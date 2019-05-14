@@ -8,14 +8,16 @@ package multichannel
 
 import (
 	"github.com/hyperledger/fabric/common/channelconfig"
-	"github.com/hyperledger/fabric/common/crypto"
+	"github.com/hyperledger/fabric/common/configtx"
 	"github.com/hyperledger/fabric/common/ledger/blockledger"
 	"github.com/hyperledger/fabric/common/policies"
+	"github.com/hyperledger/fabric/internal/pkg/identity"
 	"github.com/hyperledger/fabric/orderer/common/blockcutter"
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
 	"github.com/hyperledger/fabric/orderer/consensus"
 	cb "github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protos/orderer"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
@@ -26,20 +28,19 @@ type ChainSupport struct {
 	*BlockWriter
 	consensus.Chain
 	cutter blockcutter.Receiver
-	crypto.LocalSigner
+	identity.SignerSerializer
 }
 
 func newChainSupport(
 	registrar *Registrar,
 	ledgerResources *ledgerResources,
 	consenters map[string]consensus.Consenter,
-	signer crypto.LocalSigner,
+	signer identity.SignerSerializer,
 	blockcutterMetrics *blockcutter.Metrics,
 ) *ChainSupport {
 	// Read in the last block and metadata for the channel
 	lastBlock := blockledger.GetBlock(ledgerResources, ledgerResources.Height()-1)
-
-	metadata, err := utils.GetMetadataFromBlock(lastBlock, cb.BlockMetadataIndex_ORDERER)
+	metadata, err := protoutil.GetMetadataFromBlock(lastBlock, cb.BlockMetadataIndex_ORDERER)
 	// Assuming a block created with cb.NewBlock(), this should not
 	// error even if the orderer metadata is an empty byte slice
 	if err != nil {
@@ -48,8 +49,8 @@ func newChainSupport(
 
 	// Construct limited support needed as a parameter for additional support
 	cs := &ChainSupport{
-		ledgerResources: ledgerResources,
-		LocalSigner:     signer,
+		ledgerResources:  ledgerResources,
+		SignerSerializer: signer,
 		cutter: blockcutter.NewReceiverImpl(
 			ledgerResources.ConfigtxValidator().ChainID(),
 			ledgerResources,
@@ -80,6 +81,137 @@ func newChainSupport(
 	return cs
 }
 
+// DetectConsensusMigration identifies restart after consensus-type migration.
+// Restart after migration is detected by:
+// 1. The last block and the block before it carry a config-tx
+// 2. In both blocks we have ConsensusType.State == MAINTENANCE
+// 3. The ConsensusType.Type is different in these two blocks
+// 4. The last block metadata is empty
+func (cs *ChainSupport) DetectConsensusMigration() bool {
+	if !cs.ledgerResources.SharedConfig().Capabilities().ConsensusTypeMigration() {
+		logger.Debugf("[channel: %s] Orderer capability ConsensusTypeMigration is disabled", cs.ChainID())
+		return false
+	}
+
+	if cs.Height() <= 1 {
+		return false
+	}
+
+	lastConfigIndex, err := protoutil.GetLastConfigIndexFromBlock(cs.lastBlock)
+	if err != nil {
+		logger.Panicf("[channel: %s] Chain did not have appropriately encoded last config in its latest block: %s",
+			cs.ChainID(), err)
+	}
+	logger.Debugf("[channel: %s] lastBlockNumber=%d, lastConfigIndex=%d",
+		cs.support.ChainID(), cs.lastBlock.Header.Number, lastConfigIndex)
+	if lastConfigIndex != cs.lastBlock.Header.Number {
+		return false
+	}
+
+	currentState := cs.support.SharedConfig().ConsensusState()
+	logger.Debugf("[channel: %s] last block ConsensusState=%s", cs.ChainID(), currentState)
+	if currentState != orderer.ConsensusType_STATE_MAINTENANCE {
+		return false
+	}
+
+	metadata, err := protoutil.GetMetadataFromBlock(cs.lastBlock, cb.BlockMetadataIndex_ORDERER)
+	if err != nil {
+		logger.Panicf("[channel: %s] Error extracting orderer metadata: %s", cs.ChainID(), err)
+	}
+
+	metaLen := len(metadata.Value)
+	logger.Debugf("[channel: %s] metadata.Value length=%d", cs.ChainID(), metaLen)
+	if metaLen > 0 {
+		return false
+	}
+
+	prevBlock := blockledger.GetBlock(cs.Reader(), cs.lastBlock.Header.Number-1)
+	prevConfigIndex, err := protoutil.GetLastConfigIndexFromBlock(prevBlock)
+	if err != nil {
+		logger.Panicf("Chain did not have appropriately encoded last config in block %d: %s",
+			prevBlock.Header.Number, err)
+	}
+	if prevConfigIndex != prevBlock.Header.Number {
+		return false
+	}
+
+	prevPayload, prevChanHdr := cs.extractPayloadHeaderOrPanic(prevBlock)
+
+	switch cb.HeaderType(prevChanHdr.Type) {
+	case cb.HeaderType_ORDERER_TRANSACTION:
+		return false
+
+	case cb.HeaderType_CONFIG:
+		return cs.isConsensusTypeChange(prevPayload, prevChanHdr.ChannelId, prevBlock.Header.Number)
+
+	default:
+		logger.Panicf("[channel: %s] config block with unknown header type in block %d: %v",
+			cs.ChainID(), prevBlock.Header.Number, prevChanHdr.Type)
+		return false
+	}
+}
+
+func (cs *ChainSupport) extractPayloadHeaderOrPanic(prevBlock *cb.Block) (*cb.Payload, *cb.ChannelHeader) {
+	configTx, err := protoutil.ExtractEnvelope(prevBlock, 0)
+	if err != nil {
+		logger.Panicf("[channel: %s] Error extracting configtx from block %d: %s",
+			cs.ChainID(), prevBlock.Header.Number, err)
+	}
+	payload, err := protoutil.UnmarshalPayload(configTx.Payload)
+	if err != nil {
+		logger.Panicf("[channel: %s] configtx payload is invalid in block %d: %s",
+			cs.ChainID(), prevBlock.Header.Number, err)
+	}
+	if payload.Header == nil {
+		logger.Panicf("[channel: %s] configtx payload header is missing in block %d",
+			cs.ChainID(), prevBlock.Header.Number)
+	}
+	chdr, err := protoutil.UnmarshalChannelHeader(payload.Header.ChannelHeader)
+	if err != nil {
+		logger.Panicf("[channel: %s] invalid channel header in block %d: %s",
+			cs.ChainID(), prevBlock.Header.Number, err)
+	}
+	return payload, chdr
+}
+
+func (cs *ChainSupport) isConsensusTypeChange(payload *cb.Payload, channelId string, headerNumber uint64) bool {
+	configEnvelope, err := configtx.UnmarshalConfigEnvelope(payload.Data)
+	if err != nil {
+		logger.Panicf("[channel: %s] Error extracting config envelope in block %d: %s",
+			cs.ChainID(), headerNumber, err)
+	}
+
+	bundle, err := cs.CreateBundle(channelId, configEnvelope.Config)
+	if err != nil {
+		logger.Panicf("[channel: %s] Error converting config to a bundle in block %d: %s",
+			cs.ChainID(), headerNumber, err)
+	}
+
+	oc, ok := bundle.OrdererConfig()
+	if !ok {
+		logger.Panicf("[channel: %s] OrdererConfig missing from bundle in block %d",
+			cs.ChainID(), headerNumber)
+	}
+
+	prevState := oc.ConsensusState()
+	logger.Debugf("[channel: %s] previous block ConsensusState=%s", cs.ChainID(), prevState)
+	if prevState != orderer.ConsensusType_STATE_MAINTENANCE {
+		return false
+	}
+
+	currentType := cs.SharedConfig().ConsensusType()
+	prevType := oc.ConsensusType()
+	logger.Debugf("[channel: %s] block ConsensusType: previous=%s, current=%s", cs.ChainID(), prevType, currentType)
+	if currentType == prevType {
+		return false
+	}
+
+	logger.Infof("[channel: %s] Consensus-type migration detected, ConsensusState=%s, ConsensusType changed from %s to %s",
+		cs.ChainID(), cs.support.SharedConfig().ConsensusState(), prevType, currentType)
+
+	return true
+}
+
 // Block returns a block with the following number,
 // or nil if such a block doesn't exist.
 func (cs *ChainSupport) Block(number uint64) *cb.Block {
@@ -93,8 +225,8 @@ func (cs *ChainSupport) Reader() blockledger.Reader {
 	return cs
 }
 
-// Signer returns the crypto.Localsigner for this channel.
-func (cs *ChainSupport) Signer() crypto.LocalSigner {
+// Signer returns the SignerSerializer for this channel.
+func (cs *ChainSupport) Signer() identity.SignerSerializer {
 	return cs
 }
 
@@ -146,13 +278,19 @@ func (cs *ChainSupport) Sequence() uint64 {
 	return cs.ConfigtxValidator().Sequence()
 }
 
+// Append appends a new block to the ledger in its raw form,
+// unlike WriteBlock that also mutates its metadata.
+func (cs *ChainSupport) Append(block *cb.Block) error {
+	return cs.ledgerResources.ReadWriter.Append(block)
+}
+
 // VerifyBlockSignature verifies a signature of a block.
 // It has an optional argument of a configuration envelope
 // which would make the block verification to use validation rules
 // based on the given configuration in the ConfigEnvelope.
 // If the config envelope passed is nil, then the validation rules used
 // are the ones that were applied at commit of previous blocks.
-func (cs *ChainSupport) VerifyBlockSignature(sd []*cb.SignedData, envelope *cb.ConfigEnvelope) error {
+func (cs *ChainSupport) VerifyBlockSignature(sd []*protoutil.SignedData, envelope *cb.ConfigEnvelope) error {
 	policyMgr := cs.PolicyManager()
 	// If the envelope passed isn't nil, we should use a different policy manager.
 	if envelope != nil {

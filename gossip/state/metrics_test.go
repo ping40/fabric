@@ -13,10 +13,10 @@ import (
 	"github.com/hyperledger/fabric/gossip/discovery"
 	"github.com/hyperledger/fabric/gossip/metrics"
 	gmetricsmocks "github.com/hyperledger/fabric/gossip/metrics/mocks"
+	"github.com/hyperledger/fabric/gossip/protoext"
 	"github.com/hyperledger/fabric/gossip/state/mocks"
-	pcomm "github.com/hyperledger/fabric/protos/common"
 	proto "github.com/hyperledger/fabric/protos/gossip"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -29,7 +29,7 @@ func TestMetrics(t *testing.T) {
 	g := &mocks.GossipMock{}
 	g.On("PeersOfChannel", mock.Anything).Return([]discovery.NetworkMember{})
 	g.On("Accept", mock.Anything, false).Return(make(<-chan *proto.GossipMessage), nil)
-	g.On("Accept", mock.Anything, true).Return(nil, make(chan proto.ReceivedMessage))
+	g.On("Accept", mock.Anything, true).Return(nil, make(chan protoext.ReceivedMessage))
 
 	heightWG := sync.WaitGroup{}
 	heightWG.Add(1)
@@ -48,26 +48,15 @@ func TestMetrics(t *testing.T) {
 	gossipMetrics := metrics.NewGossipMetrics(testMetricProvider.FakeProvider)
 
 	// create peer with fake metrics provider for gossip state
-	p := newPeerNodeWithGossipWithMetrics(newGossipConfig(0, 0),
-		mc, noopPeerIdentityAcceptor, g, gossipMetrics)
+	p := newPeerNodeWithGossipWithMetrics(0, mc, noopPeerIdentityAcceptor, g, gossipMetrics)
 	defer p.shutdown()
 
 	// add a payload to the payload buffer
 	err := p.s.AddPayload(&proto.Payload{
 		SeqNum: 100,
-		Data:   utils.MarshalOrPanic(pcomm.NewBlock(100, []byte{})),
+		Data:   protoutil.MarshalOrPanic(protoutil.NewBlock(100, []byte{})),
 	})
 	assert.NoError(t, err)
-
-	// after the push payload buffer size should be 1, and it should've been reported
-	assert.Equal(t,
-		[]string{"channel", "testchainid"},
-		testMetricProvider.FakePayloadBufferSizeGauge.WithArgsForCall(0),
-	)
-	assert.EqualValues(t,
-		1,
-		testMetricProvider.FakePayloadBufferSizeGauge.SetArgsForCall(0),
-	)
 
 	// update the ledger height to prepare for the pop operation
 	mc.On("LedgerHeight", mock.Anything).Return(uint64(101), nil)
@@ -86,14 +75,19 @@ func TestMetrics(t *testing.T) {
 		testMetricProvider.FakeHeightGauge.SetArgsForCall(0),
 	)
 
-	// after the pop payload buffer size should be 0, and it should've been reported
+	// after push or pop payload buffer size should be reported
+	assert.Equal(t,
+		[]string{"channel", "testchainid"},
+		testMetricProvider.FakePayloadBufferSizeGauge.WithArgsForCall(0),
+	)
 	assert.Equal(t,
 		[]string{"channel", "testchainid"},
 		testMetricProvider.FakePayloadBufferSizeGauge.WithArgsForCall(1),
 	)
-	assert.EqualValues(t,
-		0,
-		testMetricProvider.FakePayloadBufferSizeGauge.SetArgsForCall(1),
-	)
+	// both 0 and 1 as size can be reported, depends on timing
+	size := testMetricProvider.FakePayloadBufferSizeGauge.SetArgsForCall(0)
+	assert.True(t, size == 1 || size == 0)
+	size = testMetricProvider.FakePayloadBufferSizeGauge.SetArgsForCall(1)
+	assert.True(t, size == 1 || size == 0)
 
 }

@@ -82,7 +82,7 @@ var _ = Describe("LSCC", func() {
 		})
 
 		It("returns the chaincode deployment spec for a valid chaincode", func() {
-			ccci, err := l.ChaincodeContainerInfo("chaincode-data-name", fakeQueryExecutor)
+			ccci, err := l.ChaincodeContainerInfo("", "chaincode-data-name", fakeQueryExecutor)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ccci).To(Equal(ccprovider.DeploymentSpecToChaincodeContainerInfo(deploymentSpec)))
 
@@ -98,7 +98,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("wraps and returns the error", func() {
-				_, err := l.ChaincodeContainerInfo("chaincode-data-name", fakeQueryExecutor)
+				_, err := l.ChaincodeContainerInfo("", "chaincode-data-name", fakeQueryExecutor)
 				Expect(err).To(MatchError("could not retrieve state for chaincode chaincode-data-name: fake-error"))
 			})
 		})
@@ -109,7 +109,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := l.ChaincodeContainerInfo("chaincode-data-name", fakeQueryExecutor)
+				_, err := l.ChaincodeContainerInfo("", "chaincode-data-name", fakeQueryExecutor)
 				Expect(err).To(MatchError("chaincode chaincode-data-name not found"))
 			})
 		})
@@ -120,7 +120,7 @@ var _ = Describe("LSCC", func() {
 		})
 
 		It("retrieves the chaincode data from the state", func() {
-			chaincodeDefinition, err := l.ChaincodeDefinition("cc-name", fakeQueryExecutor)
+			chaincodeDefinition, err := l.ChaincodeDefinition("", "cc-name", fakeQueryExecutor)
 			Expect(err).NotTo(HaveOccurred())
 			returnedChaincodeData, ok := chaincodeDefinition.(*ccprovider.ChaincodeData)
 			Expect(ok).To(BeTrue())
@@ -138,7 +138,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("returns the wrapped error", func() {
-				_, err := l.ChaincodeDefinition("cc-name", fakeQueryExecutor)
+				_, err := l.ChaincodeDefinition("", "cc-name", fakeQueryExecutor)
 				Expect(err).To(MatchError("could not retrieve state for chaincode cc-name: fake-error"))
 			})
 		})
@@ -149,7 +149,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("returns an error", func() {
-				_, err := l.ChaincodeDefinition("cc-name", fakeQueryExecutor)
+				_, err := l.ChaincodeDefinition("", "cc-name", fakeQueryExecutor)
 				Expect(err).To(MatchError("chaincode cc-name not found"))
 			})
 		})
@@ -160,7 +160,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("wraps and returns the error", func() {
-				_, err := l.ChaincodeDefinition("cc-name", fakeQueryExecutor)
+				_, err := l.ChaincodeDefinition("", "cc-name", fakeQueryExecutor)
 				Expect(err).To(MatchError(MatchRegexp("chaincode cc-name has bad definition: proto:.*")))
 			})
 		})
@@ -171,7 +171,7 @@ var _ = Describe("LSCC", func() {
 		})
 
 		It("retrieves the chaincode data from the state", func() {
-			vscc, policy, unexpectedErr, validationErr := l.ValidationInfo("cc-name", fakeQueryExecutor)
+			vscc, policy, unexpectedErr, validationErr := l.ValidationInfo("", "cc-name", fakeQueryExecutor)
 			Expect(validationErr).NotTo(HaveOccurred())
 			Expect(unexpectedErr).NotTo(HaveOccurred())
 			Expect(vscc).To(Equal(ccData.Vscc))
@@ -189,7 +189,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("returns the wrapped error", func() {
-				_, _, unexpectedErr, validationErr := l.ValidationInfo("cc-name", fakeQueryExecutor)
+				_, _, unexpectedErr, validationErr := l.ValidationInfo("", "cc-name", fakeQueryExecutor)
 				Expect(unexpectedErr).To(MatchError("could not retrieve state for chaincode cc-name: fake-error"))
 				Expect(validationErr).NotTo(HaveOccurred())
 			})
@@ -201,7 +201,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("returns an error", func() {
-				_, _, unexpectedErr, validationErr := l.ValidationInfo("cc-name", fakeQueryExecutor)
+				_, _, unexpectedErr, validationErr := l.ValidationInfo("", "cc-name", fakeQueryExecutor)
 				Expect(unexpectedErr).NotTo(HaveOccurred())
 				Expect(validationErr).To(MatchError("chaincode cc-name not found"))
 			})
@@ -213,7 +213,7 @@ var _ = Describe("LSCC", func() {
 			})
 
 			It("wraps and returns the error", func() {
-				_, _, unexpectedErr, validationErr := l.ValidationInfo("cc-name", fakeQueryExecutor)
+				_, _, unexpectedErr, validationErr := l.ValidationInfo("", "cc-name", fakeQueryExecutor)
 				Expect(validationErr).NotTo(HaveOccurred())
 				Expect(unexpectedErr).To(MatchError(MatchRegexp("chaincode cc-name has bad definition: proto:.*")))
 			})

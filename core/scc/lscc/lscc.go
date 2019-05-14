@@ -31,18 +31,24 @@ import (
 	"github.com/hyperledger/fabric/protos/common"
 	mb "github.com/hyperledger/fabric/protos/msp"
 	pb "github.com/hyperledger/fabric/protos/peer"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 )
 
-//The life cycle system chaincode manages chaincodes deployed
-//on this peer. It manages chaincodes via Invoke proposals.
+// The lifecycle system chaincode manages chaincodes deployed
+// on this peer. It manages chaincodes via Invoke proposals.
 //     "Args":["deploy",<ChaincodeDeploymentSpec>]
 //     "Args":["upgrade",<ChaincodeDeploymentSpec>]
 //     "Args":["stop",<ChaincodeInvocationSpec>]
 //     "Args":["start",<ChaincodeInvocationSpec>]
 
-var logger = flogging.MustGetLogger("lscc")
+var (
+	logger = flogging.MustGetLogger("lscc")
+	// NOTE these regular expressions should stay in sync with those defined in
+	// core/chaincode/lifecycle/scc.go until LSCC has been removed.
+	chaincodeNameRegExp    = regexp.MustCompile("^[a-zA-Z0-9]+([-_][a-zA-Z0-9]+)*$")
+	chaincodeVersionRegExp = regexp.MustCompile("^[A-Za-z0-9_.+-]+$")
+)
 
 const (
 	// chaincode lifecycle commands
@@ -91,9 +97,6 @@ const (
 
 	// GETCOLLECTIONSCONFIGALIAS gets the collections config for a chaincode
 	GETCOLLECTIONSCONFIGALIAS = "getcollectionsconfig"
-
-	allowedChaincodeName = "^[a-zA-Z0-9]+([-_][a-zA-Z0-9]+)*$"
-	allowedCharsVersion  = "[A-Za-z0-9_.+-]+"
 )
 
 // FilesystemSupport contains functions that LSCC requires to execute its tasks
@@ -161,7 +164,7 @@ func (lscc *LifeCycleSysCC) InvokableExternal() bool   { return true }
 func (lscc *LifeCycleSysCC) InvokableCC2CC() bool      { return true }
 func (lscc *LifeCycleSysCC) Enabled() bool             { return true }
 
-func (lscc *LifeCycleSysCC) ChaincodeContainerInfo(chaincodeName string, qe ledger.SimpleQueryExecutor) (*ccprovider.ChaincodeContainerInfo, error) {
+func (lscc *LifeCycleSysCC) ChaincodeContainerInfo(channelID, chaincodeName string, qe ledger.SimpleQueryExecutor) (*ccprovider.ChaincodeContainerInfo, error) {
 	chaincodeDataBytes, err := qe.GetState("lscc", chaincodeName)
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not retrieve state for chaincode %s", chaincodeName)
@@ -182,7 +185,7 @@ func (lscc *LifeCycleSysCC) ChaincodeContainerInfo(chaincodeName string, qe ledg
 	return ccprovider.DeploymentSpecToChaincodeContainerInfo(cds), nil
 }
 
-func (lscc *LifeCycleSysCC) ChaincodeDefinition(chaincodeName string, qe ledger.SimpleQueryExecutor) (ccprovider.ChaincodeDefinition, error) {
+func (lscc *LifeCycleSysCC) ChaincodeDefinition(channelID, chaincodeName string, qe ledger.SimpleQueryExecutor) (ccprovider.ChaincodeDefinition, error) {
 	chaincodeDataBytes, err := qe.GetState("lscc", chaincodeName)
 	if err != nil {
 		return nil, errors.Wrapf(err, "could not retrieve state for chaincode %s", chaincodeName)
@@ -207,7 +210,7 @@ func (lscc *LifeCycleSysCC) ChaincodeDefinition(chaincodeName string, qe ledger.
 // needs to tell apart the two types of error to halt processing on the channel if the
 // unexpected error is not nil and mark the transaction as invalid if the validation error
 // is not nil.
-func (lscc *LifeCycleSysCC) ValidationInfo(chaincodeName string, qe ledger.QueryExecutor) (plugin string, args []byte, unexpectedErr error, validationErr error) {
+func (lscc *LifeCycleSysCC) ValidationInfo(channelID, chaincodeName string, qe ledger.SimpleQueryExecutor) (plugin string, args []byte, unexpectedErr error, validationErr error) {
 	chaincodeDataBytes, err := qe.GetState("lscc", chaincodeName)
 	if err != nil {
 		// failure to access the ledger is clearly an unexpected
@@ -366,7 +369,7 @@ func (lscc *LifeCycleSysCC) putChaincodeCollectionData(stub shim.ChaincodeStubIn
 
 	err = stub.PutState(key, collectionConfigBytes)
 	if err != nil {
-		return errors.WithMessage(err, fmt.Sprintf("error putting collection for chaincode %s:%s", cd.Name, cd.Version))
+		return errors.WithMessagef(err, "error putting collection for chaincode %s:%s", cd.Name, cd.Version)
 	}
 
 	return nil
@@ -529,7 +532,7 @@ func (lscc *LifeCycleSysCC) isValidChaincodeName(chaincodeName string) error {
 		return EmptyChaincodeNameErr("")
 	}
 
-	if !isValidCCNameOrVersion(chaincodeName, allowedChaincodeName) {
+	if !chaincodeNameRegExp.MatchString(chaincodeName) {
 		return InvalidChaincodeNameErr(chaincodeName)
 	}
 
@@ -544,22 +547,11 @@ func (lscc *LifeCycleSysCC) isValidChaincodeVersion(chaincodeName string, versio
 		return EmptyVersionErr(chaincodeName)
 	}
 
-	if !isValidCCNameOrVersion(version, allowedCharsVersion) {
+	if !chaincodeVersionRegExp.MatchString(version) {
 		return InvalidVersionErr(version)
 	}
 
 	return nil
-}
-
-func isValidCCNameOrVersion(ccNameOrVersion string, regExp string) bool {
-	re, _ := regexp.Compile(regExp)
-
-	matched := re.FindString(ccNameOrVersion)
-	if len(matched) != len(ccNameOrVersion) {
-		return false
-	}
-
-	return true
 }
 
 func isValidStatedbArtifactsTar(statedbArtifactsTar []byte) error {
@@ -814,7 +806,7 @@ func (lscc *LifeCycleSysCC) executeUpgrade(stub shim.ChaincodeStubInterface, cha
 	}
 
 	lifecycleEvent := &pb.LifecycleEvent{ChaincodeName: chaincodeName}
-	lifecycleEventBytes := utils.MarshalOrPanic(lifecycleEvent)
+	lifecycleEventBytes := protoutil.MarshalOrPanic(lifecycleEvent)
 	stub.SetEvent(UPGRADE, lifecycleEventBytes)
 	return cdfs, nil
 }
@@ -884,6 +876,10 @@ func (lscc *LifeCycleSysCC) Invoke(stub shim.ChaincodeStubInterface) pb.Response
 			logger.Panicf("programming error, non-existent appplication config for channel '%s'", channel)
 		}
 
+		if ac.Capabilities().LifecycleV20() {
+			return shim.Error(fmt.Sprintf("Channel '%s' has been migrated to the new lifecycle, LSCC is now read-only", channel))
+		}
+
 		// the maximum number of arguments depends on the capability of the channel
 		if !ac.Capabilities().PrivateChannelData() && len(args) > 6 {
 			return shim.Error(PrivateChannelDataNotAvailable("").Error())
@@ -909,7 +905,7 @@ func (lscc *LifeCycleSysCC) Invoke(stub shim.ChaincodeStubInterface) pb.Response
 			EP = args[3]
 		} else {
 			p := cauthdsl.SignedByAnyMember(peer.GetMSPIDs(channel))
-			EP, err = utils.Marshal(p)
+			EP, err = protoutil.Marshal(p)
 			if err != nil {
 				return shim.Error(err.Error())
 			}

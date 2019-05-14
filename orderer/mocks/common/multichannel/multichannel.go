@@ -13,7 +13,7 @@ import (
 	"github.com/hyperledger/fabric/orderer/common/msgprocessor"
 	mockblockcutter "github.com/hyperledger/fabric/orderer/mocks/common/blockcutter"
 	cb "github.com/hyperledger/fabric/protos/common"
-	"github.com/hyperledger/fabric/protos/utils"
+	"github.com/hyperledger/fabric/protoutil"
 )
 
 // ConsenterSupport is used to mock the multichannel.ConsenterSupport interface
@@ -21,6 +21,9 @@ import (
 type ConsenterSupport struct {
 	// SharedConfigVal is the value returned by SharedConfig()
 	SharedConfigVal *mockconfig.Orderer
+
+	// SharedConfigVal is the value returned by ChannelConfig()
+	ChannelConfigVal *mockconfig.Channel
 
 	// BlockCutterVal is the value returned by BlockCutter()
 	BlockCutterVal *mockblockcutter.Receiver
@@ -83,12 +86,17 @@ func (mcs *ConsenterSupport) SharedConfig() channelconfig.Orderer {
 	return mcs.SharedConfigVal
 }
 
+// ChannelConfig returns ChannelConfigVal
+func (mcs *ConsenterSupport) ChannelConfig() channelconfig.Channel {
+	return mcs.ChannelConfigVal
+}
+
 // CreateNextBlock creates a simple block structure with the given data
 func (mcs *ConsenterSupport) CreateNextBlock(data []*cb.Envelope) *cb.Block {
-	block := cb.NewBlock(0, nil)
+	block := protoutil.NewBlock(0, nil)
 	mtxs := make([][]byte, len(data))
 	for i := range data {
-		mtxs[i] = utils.MarshalOrPanic(data[i])
+		mtxs[i] = protoutil.MarshalOrPanic(data[i])
 	}
 	block.Data = &cb.BlockData{Data: mtxs}
 	mcs.NextBlockVal = block
@@ -98,10 +106,9 @@ func (mcs *ConsenterSupport) CreateNextBlock(data []*cb.Envelope) *cb.Block {
 // WriteBlock writes data to the Blocks channel
 func (mcs *ConsenterSupport) WriteBlock(block *cb.Block, encodedMetadataValue []byte) {
 	if encodedMetadataValue != nil {
-		block.Metadata.Metadata[cb.BlockMetadataIndex_ORDERER] = utils.MarshalOrPanic(&cb.Metadata{Value: encodedMetadataValue})
+		block.Metadata.Metadata[cb.BlockMetadataIndex_ORDERER] = protoutil.MarshalOrPanic(&cb.Metadata{Value: encodedMetadataValue})
 	}
-	mcs.HeightVal++
-	mcs.Blocks <- block
+	mcs.Append(block)
 }
 
 // WriteConfigBlock calls WriteBlock
@@ -122,6 +129,11 @@ func (mcs *ConsenterSupport) Height() uint64 {
 // Sign returns the bytes passed in
 func (mcs *ConsenterSupport) Sign(message []byte) ([]byte, error) {
 	return message, nil
+}
+
+// Serialize returns bytes
+func (mcs *ConsenterSupport) Serialize() ([]byte, error) {
+	return []byte("creator"), nil
 }
 
 // NewSignatureHeader returns an empty signature header
@@ -155,6 +167,18 @@ func (mcs *ConsenterSupport) Sequence() uint64 {
 }
 
 // VerifyBlockSignature verifies a signature of a block
-func (mcs *ConsenterSupport) VerifyBlockSignature(_ []*cb.SignedData, _ *cb.ConfigEnvelope) error {
+func (mcs *ConsenterSupport) VerifyBlockSignature(_ []*protoutil.SignedData, _ *cb.ConfigEnvelope) error {
 	return mcs.BlockVerificationErr
+}
+
+// Append appends a new block to the ledger in its raw form,
+// unlike WriteBlock that also mutates its metadata.
+func (mcs *ConsenterSupport) Append(block *cb.Block) error {
+	mcs.HeightVal++
+	mcs.Blocks <- block
+	return nil
+}
+
+func (mcs *ConsenterSupport) DetectConsensusMigration() bool {
+	return false
 }
