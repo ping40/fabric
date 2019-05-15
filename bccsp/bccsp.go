@@ -95,6 +95,7 @@ type EncrypterOpts interface{}
 // DecrypterOpts contains options for decrypting with a CSP.
 type DecrypterOpts interface{}
 
+// 而MSP模块是bccsp的使用者之一，应该是在它这个地方只认ECDSA的key。
 // BCCSP is the blockchain cryptographic service provider that offers
 // the implementation of cryptographic standards and algorithms.
 type BCCSP interface {
@@ -102,7 +103,7 @@ type BCCSP interface {
 	// KeyGen generates a key using opts.
 	KeyGen(opts KeyGenOpts) (k Key, err error)
 
-	// KeyDeriv derives a key from k using opts.
+	// KeyDeriv derives a key from k using opts. 目前只有idmex用到，更zk有关
 	// The opts argument should be appropriate for the primitive used.
 	KeyDeriv(k Key, opts KeyDerivOpts) (dk Key, err error)
 

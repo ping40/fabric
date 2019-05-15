@@ -474,7 +474,7 @@ func (txmgr *LockBasedTxMgr) Commit() error {
 	// 'PrepareForExpiringKeys' is invoked in-line. However, for the subsequent blocks commits, this function is invoked
 	// in advance for the next block
 	if !txmgr.pvtdataPurgeMgr.usedOnce {
-		txmgr.pvtdataPurgeMgr.PrepareForExpiringKeys(txmgr.current.blockNum())
+		txmgr.pvtdataPurgeMgr.PrepareForExpiringKeys(txmgr.current.blockNum()) // 准备过期的私密键值清理
 		txmgr.pvtdataPurgeMgr.usedOnce = true
 	}
 	defer func() {
@@ -488,7 +488,7 @@ func (txmgr *LockBasedTxMgr) Commit() error {
 		panic("validateAndPrepare() method should have been called before calling commit()")
 	}
 
-	if err := txmgr.pvtdataPurgeMgr.DeleteExpiredAndUpdateBookkeeping(
+	if err := txmgr.pvtdataPurgeMgr.DeleteExpiredAndUpdateBookkeeping( // 更新私密数据生命周期记录数据库，这里记录了每个私密键值的存活期限
 		txmgr.current.batch.PvtUpdates, txmgr.current.batch.HashUpdates); err != nil {
 		return err
 	}
@@ -496,7 +496,7 @@ func (txmgr *LockBasedTxMgr) Commit() error {
 	commitHeight := version.NewHeight(txmgr.current.blockNum(), txmgr.current.maxTxNumber())
 	txmgr.commitRWLock.Lock()
 	logger.Debugf("Write lock acquired for committing updates to state database")
-	if err := txmgr.db.ApplyPrivacyAwareUpdates(txmgr.current.batch, commitHeight); err != nil {
+	if err := txmgr.db.ApplyPrivacyAwareUpdates(txmgr.current.batch, commitHeight); err != nil { 	// 更新本地公共状态数据库和私密状态数据库
 		txmgr.commitRWLock.Unlock()
 		return err
 	}

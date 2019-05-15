@@ -92,7 +92,14 @@ K := $(foreach exec,$(EXECUTABLES),\
 
 PROTOS = $(shell git ls-files *.proto | grep -Ev 'vendor/|testdata/')
 # No sense rebuilding when non production code is changed
+<<<<<<< HEAD
 PROJECT_FILES = $(shell git ls-files  | grep -E '.go$')
+=======
+PROJECT_FILES = $(shell git ls-files  | grep -v ^test | grep -v ^unit-test | \
+	grep -v ^.git | grep -v ^examples | grep -v ^devenv | grep  .go$ | \
+	grep -v ^LICENSE | grep -v ^vendor )
+RELEASE_TEMPLATES = $(shell git ls-files | grep "release/templates")
+>>>>>>> 4e8c1fb2c4dab7826fd1762fab47406b96bc90f6
 IMAGES = peer orderer baseos ccenv buildenv tools
 RELEASE_PLATFORMS = windows-amd64 darwin-amd64 linux-amd64 linux-s390x linux-ppc64le
 RELEASE_PKGS = configtxgen cryptogen idemixgen discover token configtxlator peer orderer

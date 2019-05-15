@@ -153,6 +153,7 @@ BCCSP，是blockchain cryptographic service provider的缩写，个人译作区�
 
 fabric gossip是基于pull的gossip。
 
+<<<<<<< HEAD
 3.7.1 msgstore模块 继续...
 
 
@@ -161,3 +162,6 @@ golevel:
 关于 transaction：db级别只能一个， 会block：  Write and OpenTransaction，也就是batch也不行了。 
 writeLockC   chan struct{} --> buffer 1: open transaction 拥有的lock。
  	
+=======
+3.7.1 msgstore模块 继续...
+>>>>>>> 4e8c1fb2c4dab7826fd1762fab47406b96bc90f6

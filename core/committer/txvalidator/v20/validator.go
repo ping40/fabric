@@ -202,7 +202,7 @@ func (v *TxValidator) Validate(block *common.Block) error {
 
 	// now we read responses in the order in which they come back
 	for i := 0; i < len(block.Data.Data); i++ {
-		res := <-results
+		res := <-results //保证同步
 
 		if res.err != nil {
 			// if there is an error, we buffer its value, wait for
@@ -236,10 +236,10 @@ func (v *TxValidator) Validate(block *common.Block) error {
 
 	// we mark invalid any transaction that has a txid
 	// which is equal to that of a previous tx in this block
-	markTXIdDuplicates(txidArray, txsfltr)
+	markTXIdDuplicates(txidArray, txsfltr) // 标记双花交易
 
 	// make sure no transaction has skipped validation
-	err = v.allValidated(txsfltr, block)
+	err = v.allValidated(txsfltr, block) // 确认所有交易都完成检查
 	if err != nil {
 		return err
 	}
@@ -247,7 +247,7 @@ func (v *TxValidator) Validate(block *common.Block) error {
 	// Initialize metadata structure
 	protoutil.InitBlockMetadata(block)
 
-	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txsfltr
+	block.Metadata.Metadata[common.BlockMetadataIndex_TRANSACTIONS_FILTER] = txsfltr // 更新交易有效标签到元数据
 
 	elapsedValidation := time.Since(startValidation) / time.Millisecond // duration in ms
 	logger.Infof("[%s] Validated block [%d] in %dms", v.ChainID, block.Header.Number, elapsedValidation)

@@ -27,8 +27,17 @@ import (
     Other peer				   			   Initiator
 	 O	<-------- Hello <NONCE> -------------------------	O
 	/|\	--------- Digest <[3,5,8, 10...], NONCE> -------->     /|\
-	 |	<-------- Request <[3,8], NONCE> -----------------      |
+	 |	<-------- Request <[3,8], NONCE> -----------------      |   过滤工作由 pullstore.go IngressDigFilter 完成
 	/ \	--------- Response <[item3, item8], NONCE>------->     / \
+
+engine引擎执行的过程中有两个关键词，一个是摘要，一个是NONCE。摘要指从消息中择取出的足以代表
+一条消息的关键信息，身份消息的摘要即为PKI-ID，块消息的摘要则为块序号，在接收到摘要应答后，
+调用OnRes()将摘要最终存储到engine成员state中，这些摘要来自于Mediator模块处理消息的函数
+HandleMessage中处理摘要应答的分支中itemIDs[i] = p.IdExtractor(msg)，即使用的是Mediator
+模块的适配器中封装的IdExtractor函数，也因此，由于certStore模块和chanState模块所实现的适配器中的
+IdExtractor不一样，所有才能从消息中分离出两种不同的摘要。NONCE是通信安全中的一个概念，指的是用一次
+即废弃的一个整数，目的在于防止replay attack，但是在这里只是简单使用NONCE一次性的性质，在engine
+引擎周期性执行pull的过程中，每个周期中的步骤之间不产生交叉混淆。
 
 */
 
@@ -101,7 +110,7 @@ type PullEngineConfig struct {
 func NewPullEngineWithFilter(participant PullAdapter, sleepTime time.Duration, df DigestFilter,
 	config PullEngineConfig) *PullEngine {
 	engine := &PullEngine{
-		PullAdapter:        participant,
+		PullAdapter:        participant, //（虽然是成员，但是我觉得一个对象的适配器和这个对象应该是平级的关系）
 		stopFlag:           int32(0),
 		state:              util.NewSet(),
 		item2owners:        make(map[string][]string),
@@ -197,7 +206,7 @@ func (engine *PullEngine) processIncomingDigests() {
 	requestMapping := make(map[string][]string)
 	for n, sources := range engine.item2owners {
 		// select a random source
-		source := sources[util.RandomInt(len(sources))]
+		source := sources[util.RandomInt(len(sources))] // 表明同一个消息，多个peer拥有
 		if _, exists := requestMapping[source]; !exists {
 			requestMapping[source] = make([]string, 0)
 		}

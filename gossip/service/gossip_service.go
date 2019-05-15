@@ -88,13 +88,13 @@ func (p privateHandler) close() {
 	p.coordinator.Close()
 	p.reconciler.Stop()
 }
-
+//gossip服务器 ，gossip服务器主要向外界提供两个功能（其余功能较简单或已在其他模块讲述，此处略）：配置初始化或更新，频道初始化。
 type gossipServiceImpl struct {
-	gossipSvc
+	gossipSvc  // 一个gossip服务实例gossipSvc，就是gossip/gossipServiceImpl
 	privateHandlers map[string]privateHandler
-	chains          map[string]state.GossipStateProvider
-	leaderElection  map[string]election.LeaderElectionService
-	deliveryService map[string]deliverservice.DeliverService
+	chains          map[string]state.GossipStateProvider //链 各个频道的状态模块chains
+	leaderElection  map[string]election.LeaderElectionService //选举服务
+	deliveryService map[string]deliverclient.DeliverService
 	deliveryFactory DeliveryServiceFactory
 	lock            sync.RWMutex
 	mcs             api.MessageCryptoService
@@ -252,6 +252,7 @@ type DataStoreSupport struct {
 	privdata2.TransientStore
 }
 
+//这里的初始化频道主要指为gossip服务器初始化一个所在频道的state模块，然后根据配置决定是使用election模块还是直接使用分发客户端deliveryService的服务。
 // InitializeChannel allocates the state provider and should be invoked once per channel per execution
 func (g *gossipServiceImpl) InitializeChannel(chainID string, endpoints []string, support Support) {
 	g.lock.Lock()
@@ -305,9 +306,14 @@ func (g *gossipServiceImpl) InitializeChannel(chainID string, endpoints []string
 	}
 	g.privateHandlers[chainID].reconciler.Start()
 
+<<<<<<< HEAD
 	blockingMode := !viper.GetBool("peer.gossip.nonBlockingCommitMode")
 	g.chains[chainID] = state.NewGossipStateProvider(chainID, servicesAdapter, coordinator,
 		g.metrics.StateMetrics, blockingMode)
+=======
+	//构造GossipStateProviderImpl，并启动goroutine处理从orderer或其他节点接收的block
+	g.chains[chainID] = state.NewGossipStateProvider(chainID, servicesAdapter, coordinator, g.metrics.StateMetrics)
+>>>>>>> 4e8c1fb2c4dab7826fd1762fab47406b96bc90f6
 	if g.deliveryService[chainID] == nil {
 		var err error
 		g.deliveryService[chainID], err = g.deliveryFactory.Service(g, endpoints, g.mcs)
@@ -334,6 +340,7 @@ func (g *gossipServiceImpl) InitializeChannel(chainID string, endpoints []string
 
 		if leaderElection {
 			logger.Debug("Delivery uses dynamic leader election mechanism, channel", chainID)
+			//选举代表节点
 			g.leaderElection[chainID] = g.newLeaderElectionComponent(chainID, g.onStatusChangeFactory(chainID,
 				support.Committer), g.metrics.ElectionMetrics)
 		} else if isStaticOrgLeader {

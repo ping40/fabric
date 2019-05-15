@@ -169,7 +169,7 @@ func (index *blockIndex) indexBlock(blockIdxInfo *blockIdxInfo) error {
 
 	batch.Put(indexCheckpointKey, encodeBlockNum(blockIdxInfo.blockNum))
 	// Setting snyc to true as a precaution, false may be an ok optimization after further testing.
-	if err := index.db.WriteBatch(batch, true); err != nil {
+	if err := index.db.WriteBatch(batch, true); err != nil { // 原子性操作的保证
 		return err
 	}
 	return nil

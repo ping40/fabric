@@ -115,10 +115,16 @@ func NewDiscoveryService(self NetworkMember, comm CommService, crypt CryptoServi
 	d.validateSelfConfig()
 	d.msgStore = newAliveMsgStore(d)
 
+	// 周期性的发送alive消息，以告之网络中的其他结点：我还没死。间隔时间默认为5s，由core.ymal中的peer.gossip.aliveTimeInterval指定。
 	go d.periodicalSendAlive()
+    //把死的调整：周期性的检查aliveLastTS中的时间戳，判断结点是死是活，然后相应调整deadLastTS，aliveLastTS，aliveMembership，deadMembership中的信息。
 	go d.periodicalCheckAlive()
+
 	go d.handleMessages()
+    //周期性的查新尝试连接死掉的结点
 	go d.periodicalReconnectToDead()
+
+
 	go d.handlePresumedDeadPeers()
 
 	return d

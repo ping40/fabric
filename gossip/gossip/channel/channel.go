@@ -384,7 +384,7 @@ func (gc *gossipChannel) requestStateInfo() {
 		return
 	}
 	endpoints := filter.SelectPeers(gc.GetConf().PullPeerNum, gc.GetMembership(), gc.IsMemberInChan)
-	gc.Send(req, endpoints...)
+	gc.Send(req, endpoints...)  // 为什么不用 gc.Gossip ?
 }
 
 func (gc *gossipChannel) eligibleForChannelAndSameOrg(member discovery.NetworkMember) bool {
@@ -433,12 +433,12 @@ func (gc *gossipChannel) createBlockPuller() pull.Mediator {
 		Sndr:        gc,
 		MemSvc:      gc.memFilter,
 		IdExtractor: seqNumFromMsg,
-		MsgCons: func(msg *protoext.SignedGossipMessage) {
-			gc.DeMultiplex(msg)
+		MsgCons: func(msg *proto.SignedGossipMessage) {
+			gc.DeMultiplex(msg) // 从gossip接收到消息
 		},
 	}
 
-	adapter.IngressDigFilter = func(digestMsg *proto.DataDigest) *proto.DataDigest {
+	adapter.IngressDigFilter = func(digestMsg *proto.DataDigest) *proto.DataDigest { // 废弃比自己 小的区块
 		gc.RLock()
 		height := gc.ledgerHeight
 		gc.RUnlock()
@@ -562,7 +562,7 @@ func (gc *gossipChannel) ConfigureChannel(joinMsg api.JoinChannelMessage) {
 }
 
 // HandleMessage processes a message sent by a remote peer
-func (gc *gossipChannel) HandleMessage(msg protoext.ReceivedMessage) {
+func (gc *gossipChannel) HandleMessage(msg proto.ReceivedMessage) { // 是 第三层， 下面是 mediator , pullEngine
 	if !gc.verifyMsg(msg) {
 		gc.logger.Warning("Failed verifying message:", msg.GetGossipMessage().GossipMessage)
 		return
@@ -771,6 +771,17 @@ func (gc *gossipChannel) verifyBlock(msg *proto.GossipMessage, sender common.PKI
 	return true
 }
 
+/**
+在createStateInfoSnapshot函数中还体现了一个传播策略问题，即传播范围选择问题（对看上文对于Tag成员的图例解释），
+对于发送StateInfoPullRequest类型消息的结点A，接收到该请求的结点B需要判断A是否与自己在同一个组织内，
+如果A是同一个组织内的结点，则B会把存储的StateInfo消息都回给A，如果A不是同一个组织的，
+则B只把存储的非组织内消息或者既是组织内也是频道内的消息回给A。
+---------------------
+作者：609127400
+来源：CSDN
+原文：https://blog.csdn.net/idsuf698987/article/details/77898724
+版权声明：本文为博主原创文章，转载请附上博文链接！
+*/
 func (gc *gossipChannel) createStateInfoSnapshot(requestersOrg api.OrgIdentityType) *proto.GossipMessage {
 	sameOrg := bytes.Equal(gc.selfOrg, requestersOrg)
 	rawElements := gc.stateInfoMsgStore.Get()

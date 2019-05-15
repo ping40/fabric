@@ -35,7 +35,7 @@ type ConfigProcessor interface {
 }
 
 type configStore struct {
-	anchorPeers []*peer.AnchorPeer
+	anchorPeers []*peer.AnchorPeer  //前者存储了频道中所有组织中的所有结点的anchor（锚点，即包含一个结点的地址，端口）
 	orgMap      map[string]channelconfig.ApplicationOrg
 }
 
@@ -45,8 +45,8 @@ type configEventReceiver interface {
 }
 
 type configEventer struct {
-	lastConfig *configStore
-	receiver   configEventReceiver
+	lastConfig *configStore //configEventer封装了存储最新配置的成员lastConfig
+	receiver   configEventReceiver  //receiver被赋值为gossip服务器实例本身。
 }
 
 func newConfigEventer(receiver configEventReceiver) *configEventer {

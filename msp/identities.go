@@ -24,7 +24,7 @@ import (
 
 var mspIdentityLogger = flogging.MustGetLogger("msp.identity")
 
-type identity struct {
+type identity struct { //可以把Identity想象成一个部门或一个个体职员，当为一个部门时，其为组织类型，当为一个个体时，又有管理者和普通职员之分。
 	// id contains the identifier (MSPID and identity identifier) for this instance
 	id *IdentityIdentifier
 
@@ -34,7 +34,7 @@ type identity struct {
 	// this is the public key of this instance
 	pk bccsp.Key
 
-	// reference to the MSP that "owns" this identity
+	// reference to the MSP that "owns" this identity “拥有”此实例的MSP实例
 	msp *bccspmsp
 }
 

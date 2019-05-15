@@ -169,8 +169,27 @@ func (v *dispatcherImpl) Dispatch(seq int, payload *common.Payload, envBytes []b
 	}
 
 	for _, ns := range txRWSet.NsRwSets {
-		if v.txWritesToNamespace(ns) {
-			wrNamespace[ns.NameSpace] = true
+		if !v.txWritesToNamespace(ns) {//判断是否有写操作 ？
+			continue
+		}
+
+		// Check to make sure we did not already populate this chaincode
+		// name to avoid checking the same namespace twice
+		if ns.NameSpace != ccID {
+			wrNamespace = append(wrNamespace, ns.NameSpace)
+		}
+
+		if !writesToLSCC && ns.NameSpace == "lscc" {
+			writesToLSCC = true
+		}
+
+		if !writesToNonInvokableSCC && v.sccprovider.IsSysCCAndNotInvokableCC2CC(ns.NameSpace) {
+			writesToNonInvokableSCC = true
+		}
+
+		if !writesToNonInvokableSCC && v.sccprovider.IsSysCCAndNotInvokableExternal(ns.NameSpace) {
+			writesToNonInvokableSCC = true
+>>>>>>> 4e8c1fb2c4dab7826fd1762fab47406b96bc90f6
 		}
 	}
 
@@ -178,7 +197,11 @@ func (v *dispatcherImpl) Dispatch(seq int, payload *common.Payload, envBytes []b
 	// validation will behave differently depending on the chaincode
 
 	// validate *EACH* read write set according to its chaincode's endorsement policy
+<<<<<<< HEAD
 	for ns := range wrNamespace {
+=======
+	for _, ns := range wrNamespace { // 有点不清楚......
+>>>>>>> 4e8c1fb2c4dab7826fd1762fab47406b96bc90f6
 		// Get latest chaincode validation plugin name and policy
 		validationPlugin, args, err := v.GetInfoForValidate(chdr, ns)
 		if err != nil {

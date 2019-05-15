@@ -66,7 +66,7 @@ type DeliverService interface {
 
 // deliverServiceImpl the implementation of the delivery service
 // maintains connection to the ordering service and maps of
-// blocks providers
+// blocks providers peer 运行 因为只有leader结点才会启动该模块，
 type deliverServiceImpl struct {
 	conf           *Config
 	blockProviders map[string]blocksprovider.BlocksProvider
@@ -185,6 +185,7 @@ func (d *deliverServiceImpl) validateConfiguration() error {
 	return nil
 }
 
+// 只有 leader才启动
 // StartDeliverForChannel starts blocks delivery for channel
 // initializes the grpc stream for given chainID, creates blocks provider instance
 // that spawns in go routine to read new blocks starting from the position provided by ledger
@@ -255,6 +256,9 @@ func (d *deliverServiceImpl) Stop() {
 	}
 }
 
+// 在client.go中定义，实现的是/fabirc/protos/orderer/ab.pb.go中定义的AtomicBroadcast_DeliverClient
+// 这个Deliver服务的grpc流客户端接口。这里不直接使用ab.pb.go中的atomicBroadcastDeliverClient，
+// 自然是因为这个自动生成的结构不能满足功能的需要。 不能满足功能的具体理由现在还不明白 ？
 func (d *deliverServiceImpl) newClient(chainID string, ledgerInfoProvider blocksprovider.LedgerInfo) *broadcastClient {
 	reconnectBackoffThreshold := getReConnectBackoffThreshold()
 	reconnectTotalTimeThreshold := getReConnectTotalTimeThreshold()

@@ -25,7 +25,7 @@ import (
 
 var mspLogger = flogging.MustGetLogger("msp")
 
-type mspManagerImpl struct {
+type mspManagerImpl struct {//可以把MSPManager想象成一个子集团，其管理集团旗下的各个子公司，而且这些子公司主体都用一个MSP接口表示。
 	// map that contains all MSPs that we have setup or otherwise added
 	mspsMap map[string]MSP
 

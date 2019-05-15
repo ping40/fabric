@@ -163,8 +163,13 @@ func Start(cmd string, conf *localconfig.TopLevel) {
 			}
 		}
 	}
+<<<<<<< HEAD
 
 	manager := initializeMultichannelRegistrar(clusterBootBlock, r, clusterDialer, clusterServerConfig, clusterGRPCServer, conf, signer, metricsProvider, opsSystem, lf, tlsCallback)
+=======
+	// 初始化账本管理器（Registrar）结构
+	manager := initializeMultichannelRegistrar(bootstrapBlock, r, clusterDialer, clusterServerConfig, clusterGRPCServer, conf, signer, metricsProvider, lf, tlsCallback)
+>>>>>>> 4e8c1fb2c4dab7826fd1762fab47406b96bc90f6
 	mutualTLS := serverConfig.SecOpts.UseTLS && serverConfig.SecOpts.RequireClientCert
 	server := NewServer(manager, metricsProvider, &conf.Debug, conf.General.Authentication.TimeWindow, mutualTLS)
 

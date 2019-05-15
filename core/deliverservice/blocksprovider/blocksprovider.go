@@ -169,9 +169,9 @@ func (b *blocksProviderImpl) DeliverBlocks() {
 
 			numberOfPeers := len(b.gossip.PeersOfChannel(gossipcommon.ChainID(b.chainID)))
 			// Create payload with a block received
-			payload := createPayload(blockNum, marshaledBlock)
+			payload := createPayload(blockNum, marshaledBlock) // 先调用createPayload()将block数据包装成可存储在本地账本的payload，
 			// Use payload to create gossip message
-			gossipMsg := createGossipMsg(b.chainID, payload)
+			gossipMsg := createGossipMsg(b.chainID, payload) // 再调用createGossipMsg()将payload包装成可用于传播的DataMessage类型的GossipMessage消息gossipMsg
 
 			logger.Debugf("[%s] Adding payload to local buffer, blockNum = [%d]", b.chainID, blockNum)
 			// Add payload to local state payloads buffer
