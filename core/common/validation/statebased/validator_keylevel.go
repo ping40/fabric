@@ -167,18 +167,13 @@ type blockDependency struct {
 }
 
 // KeyLevelValidator implements per-key level ep validation
-type KeyLevelValidator struct {// 是针对channel的单例 ？
+type KeyLevelValidator struct { // 是针对channel的单例 ？
 	vpmgr    KeyLevelValidationParameterManager
 	blockDep blockDependency
 	pef      RWSetPolicyEvaluatorFactory
 }
 
-<<<<<<< HEAD
-func NewKeyLevelValidator(policySupport validation.PolicyEvaluator, vpmgr KeyLevelValidationParameterManager) *KeyLevelValidator {
-	logger.Errorf("ping 000 NewKeyLevelValidator  00")
-=======
 func NewKeyLevelValidator(evaluator RWSetPolicyEvaluatorFactory, vpmgr KeyLevelValidationParameterManager) *KeyLevelValidator {
->>>>>>> upstream/master
 	return &KeyLevelValidator{
 		vpmgr:    vpmgr,
 		blockDep: blockDependency{},

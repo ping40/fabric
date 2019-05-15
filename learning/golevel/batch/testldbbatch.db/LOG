@@ -1,0 +1,163 @@
+=============== Apr 4, 2019 (CST) ===============
+11:19:42.807362 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+11:19:42.808689 db@open opening
+11:19:42.809140 version@stat F·[] S·0B[] Sc·[]
+11:19:42.817729 db@janitor F·2 G·0
+11:19:42.817846 db@open done T·9.104146ms
+11:19:43.040206 transaction@flush created L0@2 N·2698 S·38KiB ",d6":"\x00\x00\x00..\x00\x00\x00,v7"
+11:19:43.051440 transaction@flush created L0@3 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v5390":"\x00\x00\x00..\x00\x00\x00,v2699"
+11:19:43.061300 transaction@flush created L0@4 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v8082":"\x00\x00\x00..\x00\x00\x00,v5391"
+11:19:43.071108 transaction@flush created L0@5 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v10774":"\x00\x00\x00..\x00\x00\x00,v8083"
+11:19:43.079536 transaction@flush created L0@6 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v13466":"\x00\x00\x00..\x00\x00\x00,v10775"
+11:19:43.088000 transaction@flush created L0@7 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v16158":"\x00\x00\x00..\x00\x00\x00,v13467"
+11:19:43.096484 transaction@flush created L0@8 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v18850":"\x00\x00\x00..\x00\x00\x00,v16159"
+11:19:43.105036 transaction@flush created L0@9 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v21542":"\x00\x00\x00..\x00\x00\x00,v18851"
+11:19:43.113387 transaction@flush created L0@10 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v24234":"\x00\x00\x00..\x00\x00\x00,v21543"
+11:19:43.121778 transaction@flush created L0@11 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v26926":"\x00\x00\x00..\x00\x00\x00,v24235"
+11:19:43.130721 transaction@flush created L0@12 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v29618":"\x00\x00\x00..\x00\x00\x00,v26927"
+11:19:43.139105 transaction@flush created L0@13 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v32310":"\x00\x00\x00..\x00\x00\x00,v29619"
+11:19:43.147525 transaction@flush created L0@14 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v35002":"\x00\x00\x00..\x00\x00\x00,v32311"
+11:19:43.156034 transaction@flush created L0@15 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v37694":"\x00\x00\x00..\x00\x00\x00,v35003"
+11:19:43.164415 transaction@flush created L0@16 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v40386":"\x00\x00\x00..\x00\x00\x00,v37695"
+11:19:43.173263 transaction@flush created L0@17 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v43078":"\x00\x00\x00..\x00\x00\x00,v40387"
+11:19:43.181794 transaction@flush created L0@18 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v45770":"\x00\x00\x00..\x00\x00\x00,v43079"
+11:19:43.190180 transaction@flush created L0@19 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v48462":"\x00\x00\x00..\x00\x00\x00,v45771"
+11:19:43.198542 transaction@flush created L0@20 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v51154":"\x00\x00\x00..\x00\x00\x00,v48463"
+11:19:43.207037 transaction@flush created L0@21 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v53846":"\x00\x00\x00..\x00\x00\x00,v51155"
+11:19:43.215356 transaction@flush created L0@22 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v56538":"\x00\x00\x00..\x00\x00\x00,v53847"
+11:19:43.223655 transaction@flush created L0@23 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v59230":"\x00\x00\x00..\x00\x00\x00,v56539"
+11:19:43.232037 transaction@flush created L0@24 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v61922":"\x00\x00\x00..\x00\x00\x00,v59231"
+11:19:43.240360 transaction@flush created L0@25 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v64614":"\x00\x00\x00..\x00\x00\x00,v61923"
+11:19:43.248639 transaction@flush created L0@26 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v67306":"\x00\x00\x00..\x00\x00\x00,v64615"
+11:19:43.257241 transaction@flush created L0@27 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v69998":"\x00\x00\x00..\x00\x00\x00,v67307"
+11:19:43.265494 transaction@flush created L0@28 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v72690":"\x00\x00\x00..\x00\x00\x00,v69999"
+11:19:43.273990 transaction@flush created L0@29 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v75382":"\x00\x00\x00..\x00\x00\x00,v72691"
+11:19:43.282376 transaction@flush created L0@30 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v78074":"\x00\x00\x00..\x00\x00\x00,v75383"
+11:19:43.290745 transaction@flush created L0@31 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v80766":"\x00\x00\x00..\x00\x00\x00,v78075"
+11:19:43.299094 transaction@flush created L0@32 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v83458":"\x00\x00\x00..\x00\x00\x00,v80767"
+11:19:43.307465 transaction@flush created L0@33 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v86150":"\x00\x00\x00..\x00\x00\x00,v83459"
+11:19:43.315823 transaction@flush created L0@34 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v88842":"\x00\x00\x00..\x00\x00\x00,v86151"
+11:19:43.324106 transaction@flush created L0@35 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v91534":"\x00\x00\x00..\x00\x00\x00,v88843"
+11:19:43.332731 transaction@flush created L0@36 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v94226":"\x00\x00\x00..\x00\x00\x00,v91535"
+11:19:43.340991 transaction@flush created L0@37 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v96918":"\x00\x00\x00..\x00\x00\x00,v94227"
+11:19:43.349302 transaction@flush created L0@38 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v99610":"\x00\x00\x00..\x00\x00\x00,v96919"
+11:19:43.357576 transaction@flush created L0@39 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v102302":"\x00\x00\x00..\x00\x00\x00,v99611"
+11:19:43.365888 transaction@flush created L0@40 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v104994":"\x00\x00\x00..\x00\x00\x00,v102303"
+11:19:43.374520 transaction@flush created L0@41 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v107686":"\x00\x00\x00..\x00\x00\x00,v104995"
+11:19:43.382844 transaction@flush created L0@42 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v110378":"\x00\x00\x00..\x00\x00\x00,v107687"
+11:19:43.391148 transaction@flush created L0@43 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v113070":"\x00\x00\x00..\x00\x00\x00,v110379"
+11:19:43.399461 transaction@flush created L0@44 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v115762":"\x00\x00\x00..\x00\x00\x00,v113071"
+11:19:43.408775 transaction@flush created L0@45 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v118454":"\x00\x00\x00..\x00\x00\x00,v115763"
+11:19:43.417171 transaction@flush created L0@46 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v121146":"\x00\x00\x00..\x00\x00\x00,v118455"
+11:19:43.425512 transaction@flush created L0@47 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v123838":"\x00\x00\x00..\x00\x00\x00,v121147"
+11:19:43.433907 transaction@flush created L0@48 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v126530":"\x00\x00\x00..\x00\x00\x00,v123839"
+11:19:43.442255 transaction@flush created L0@49 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v129222":"\x00\x00\x00..\x00\x00\x00,v126531"
+11:19:43.450561 transaction@flush created L0@50 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v131914":"\x00\x00\x00..\x00\x00\x00,v129223"
+11:19:43.459060 transaction@flush created L0@51 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v134606":"\x00\x00\x00..\x00\x00\x00,v131915"
+11:19:43.467662 transaction@flush created L0@52 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v137298":"\x00\x00\x00..\x00\x00\x00,v134607"
+11:19:43.476030 transaction@flush created L0@53 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v139990":"\x00\x00\x00..\x00\x00\x00,v137299"
+11:19:43.484257 transaction@flush created L0@54 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v142682":"\x00\x00\x00..\x00\x00\x00,v139991"
+11:19:43.492491 transaction@flush created L0@55 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v145374":"\x00\x00\x00..\x00\x00\x00,v142683"
+11:19:43.500734 transaction@flush created L0@56 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v148066":"\x00\x00\x00..\x00\x00\x00,v145375"
+11:19:43.509239 transaction@flush created L0@57 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v150758":"\x00\x00\x00..\x00\x00\x00,v148067"
+11:19:43.517467 transaction@flush created L0@58 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v153450":"\x00\x00\x00..\x00\x00\x00,v150759"
+11:19:43.525726 transaction@flush created L0@59 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v156142":"\x00\x00\x00..\x00\x00\x00,v153451"
+11:19:43.534071 transaction@flush created L0@60 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v158834":"\x00\x00\x00..\x00\x00\x00,v156143"
+11:19:43.542443 transaction@flush created L0@61 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v161526":"\x00\x00\x00..\x00\x00\x00,v158835"
+11:19:43.550688 transaction@flush created L0@62 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v164218":"\x00\x00\x00..\x00\x00\x00,v161527"
+11:19:43.558984 transaction@flush created L0@63 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v166910":"\x00\x00\x00..\x00\x00\x00,v164219"
+11:19:43.567217 transaction@flush created L0@64 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v169602":"\x00\x00\x00..\x00\x00\x00,v166911"
+11:19:43.575544 transaction@flush created L0@65 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v172294":"\x00\x00\x00..\x00\x00\x00,v169603"
+11:19:43.583767 transaction@flush created L0@66 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v174986":"\x00\x00\x00..\x00\x00\x00,v172295"
+11:19:43.592123 transaction@flush created L0@67 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v177678":"\x00\x00\x00..\x00\x00\x00,v174987"
+11:19:43.600368 transaction@flush created L0@68 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v180370":"\x00\x00\x00..\x00\x00\x00,v177679"
+11:19:43.608858 transaction@flush created L0@69 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v183062":"\x00\x00\x00..\x00\x00\x00,v180371"
+11:19:43.617093 transaction@flush created L0@70 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v185754":"\x00\x00\x00..\x00\x00\x00,v183063"
+11:19:43.625333 transaction@flush created L0@71 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v188446":"\x00\x00\x00..\x00\x00\x00,v185755"
+11:19:43.633787 transaction@flush created L0@72 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v191138":"\x00\x00\x00..\x00\x00\x00,v188447"
+11:19:43.642056 transaction@flush created L0@73 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v193830":"\x00\x00\x00..\x00\x00\x00,v191139"
+11:19:43.650361 transaction@flush created L0@74 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v196522":"\x00\x00\x00..\x00\x00\x00,v193831"
+11:19:43.658593 transaction@flush created L0@75 N·2692 S·38KiB "\x00\x00\x00..\x00\x00\x00,v199214":"\x00\x00\x00..\x00\x00\x00,v196523"
+11:19:43.666842 transaction@flush created L0@76 N·792 S·11KiB "\x00\x00\x00..\x00\x00\x00,v200006":"\x00\x00\x00..\x00\x00\x00,v199215"
+11:19:43.666956 version@stat F·[75] S·2MiB[2MiB] Sc·[18.75]
+11:19:43.675663 table@compaction L0·75 -> L1·0 S·2MiB Q·200006
+11:19:44.389974 table@build created L1@77 N·1 S·193B "\x00\x00\x00..\x00\x00\x00,v200006":"\x00\x00\x00..\x00\x00\x00,v200006"
+11:19:44.390070 version@stat F·[0 1] S·193B[0B 193B] Sc·[0.00 0.00]
+11:19:44.398269 table@compaction committed F-74 S-2MiB Ke·0 D·200005 T·722.56897ms
+11:19:44.398358 table@remove removed @76
+11:19:44.398398 table@remove removed @75
+11:19:44.398429 table@remove removed @74
+11:19:44.398459 table@remove removed @73
+11:19:44.398488 table@remove removed @72
+11:19:44.398529 table@remove removed @71
+11:19:44.398560 table@remove removed @70
+11:19:44.398590 table@remove removed @69
+11:19:44.398623 table@remove removed @68
+11:19:44.398653 table@remove removed @67
+11:19:44.398682 table@remove removed @66
+11:19:44.398714 table@remove removed @65
+11:19:44.398744 table@remove removed @64
+11:19:44.398773 table@remove removed @63
+11:19:44.398805 table@remove removed @62
+11:19:44.398836 table@remove removed @61
+11:19:44.398864 table@remove removed @60
+11:19:44.398895 table@remove removed @59
+11:19:44.398925 table@remove removed @58
+11:19:44.398954 table@remove removed @57
+11:19:44.398985 table@remove removed @56
+11:19:44.399014 table@remove removed @55
+11:19:44.399043 table@remove removed @54
+11:19:44.399073 table@remove removed @53
+11:19:44.399102 table@remove removed @52
+11:19:44.399130 table@remove removed @51
+11:19:44.399160 table@remove removed @50
+11:19:44.399190 table@remove removed @49
+11:19:44.399225 table@remove removed @48
+11:19:44.399257 table@remove removed @47
+11:19:44.399294 table@remove removed @46
+11:19:44.399325 table@remove removed @45
+11:19:44.399354 table@remove removed @44
+11:19:44.399385 table@remove removed @43
+11:19:44.399414 table@remove removed @42
+11:19:44.399442 table@remove removed @41
+11:19:44.399473 table@remove removed @40
+11:19:44.399501 table@remove removed @39
+11:19:44.399529 table@remove removed @38
+11:19:44.399558 table@remove removed @37
+11:19:44.399587 table@remove removed @36
+11:19:44.399616 table@remove removed @35
+11:19:44.399646 table@remove removed @34
+11:19:44.399674 table@remove removed @33
+11:19:44.399703 table@remove removed @32
+11:19:44.399733 table@remove removed @31
+11:19:44.399762 table@remove removed @30
+11:19:44.399791 table@remove removed @29
+11:19:44.399821 table@remove removed @28
+11:19:44.399849 table@remove removed @27
+11:19:44.399878 table@remove removed @26
+11:19:44.399919 table@remove removed @25
+11:19:44.399945 table@remove removed @24
+11:19:44.399971 table@remove removed @23
+11:19:44.399997 table@remove removed @22
+11:19:44.400029 table@remove removed @21
+11:19:44.400064 table@remove removed @20
+11:19:44.400102 table@remove removed @19
+11:19:44.400131 table@remove removed @18
+11:19:44.400156 table@remove removed @17
+11:19:44.400182 table@remove removed @16
+11:19:44.400207 table@remove removed @15
+11:19:44.400233 table@remove removed @14
+11:19:44.400257 table@remove removed @13
+11:19:44.400285 table@remove removed @12
+11:19:44.400309 table@remove removed @11
+11:19:44.400333 table@remove removed @10
+11:19:44.400357 table@remove removed @9
+11:19:44.400381 table@remove removed @8
+11:19:44.400404 table@remove removed @7
+11:19:44.400429 table@remove removed @6
+11:19:44.400453 table@remove removed @5
+11:19:44.400476 table@remove removed @4
+11:19:44.400501 table@remove removed @3
+11:19:44.400524 table@remove removed @2
+11:19:47.408634 db@close closing
+11:19:47.408791 db@close done T·152.719µs

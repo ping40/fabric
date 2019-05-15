@@ -224,7 +224,7 @@ func ReadBlockMetadata(blockMetadata *common.Metadata, configMetadata *etcdraft.
 		ConsenterIds:    make([]uint64, len(configMetadata.Consenters)),
 	}
 	// need to read consenters from the configuration
-	for i := range m.ConsenterIds {
+	for i := range m.ConsenterIds { //? 什么意思
 		m.ConsenterIds[i] = m.NextConsenterId
 		m.NextConsenterId++
 	}

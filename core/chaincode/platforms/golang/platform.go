@@ -481,15 +481,7 @@ func (p *Platform) GenerateDockerfile() (string, error) {
 	buf = append(buf, "FROM "+util.GetDockerfileFromConfig("chaincode.golang.runtime"))
 	buf = append(buf, "ADD binpackage.tar /usr/local/bin")
 
-<<<<<<< HEAD
-	dockerFileContents := strings.Join(buf, "\n")
-
-
-	logger.Infof("ping 0xffea dockerFileContents : %+v \n ", dockerFileContents )
-	return dockerFileContents, nil
-=======
 	return strings.Join(buf, "\n"), nil
->>>>>>> upstream/master
 }
 
 const staticLDFlagsOpts = "-ldflags \"-linkmode external -extldflags '-static'\""

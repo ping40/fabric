@@ -13,6 +13,7 @@ import (
 	"github.com/hyperledger/fabric/protoutil"
 )
 
+// over
 // blockCreator holds number and hash of latest block
 // so that next block will be created based on it.
 type blockCreator struct {
